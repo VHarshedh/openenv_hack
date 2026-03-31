@@ -157,6 +157,12 @@ def run_all_tests():
         print(f"  read_ticket → reward={sr.reward}, done={sr.done}")
 
         sr = env.step(CallToolAction(
+            tool_name="search_knowledge_base",
+            arguments={"query": "data export"},
+        ))
+        print(f"  search_kb → reward={sr.reward}, done={sr.done}")
+
+        sr = env.step(CallToolAction(
             tool_name="escalate_ticket", arguments={"department": "engineering"}
         ))
         print(f"  escalate(engineering) → reward={sr.reward:.2f}, done={sr.done}")
@@ -172,10 +178,11 @@ def run_all_tests():
     print("═" * 50)
     all_pass = True
     for name, reward, done in results:
-        status = "✅" if done and reward > 0.3 else "⚠️"
-        if not done:
+        if not done or reward < 0.3:
             status = "❌"
             all_pass = False
+        else:
+            status = "✅"
         print(f"  {status} {name}: reward={reward:.2f}, done={done}")
 
     avg = sum(r[1] for r in results) / len(results) if results else 0

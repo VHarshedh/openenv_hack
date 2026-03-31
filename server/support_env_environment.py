@@ -22,25 +22,14 @@ All interactions happen through MCP tools:
 from typing import Any, Optional
 from uuid import uuid4
 
-# Support both in-repo and standalone imports
-try:
-    from openenv.core.env_server.mcp_environment import MCPEnvironment
-    from openenv.core.env_server.mcp_types import (
-        CallToolAction,
-        CallToolObservation,
-        ListToolsAction,
-        ListToolsObservation,
-    )
-    from openenv.core.env_server.types import Action, Observation, State
-except ImportError:
-    from openenv.core.env_server.mcp_environment import MCPEnvironment
-    from openenv.core.env_server.mcp_types import (
-        CallToolAction,
-        CallToolObservation,
-        ListToolsAction,
-        ListToolsObservation,
-    )
-    from openenv.core.env_server.types import Action, Observation, State
+from openenv.core.env_server.mcp_environment import MCPEnvironment
+from openenv.core.env_server.mcp_types import (
+    CallToolAction,
+    CallToolObservation,
+    ListToolsAction,
+    ListToolsObservation,
+)
+from openenv.core.env_server.types import Action, Observation, State
 
 from fastmcp import FastMCP
 
@@ -115,8 +104,8 @@ KNOWLEDGE_BASE = {
         "POLICY: Account Management\n"
         "1. Users can update their email and password from settings.\n"
         "2. Plan changes take effect at the next billing cycle.\n"
-        "3. Account deletion requires a 14-day cooling-off period.\n"
-        "4. Suspended accounts can be reactivated by contacting support."
+        "3. Account deletion requires a 14-day cooling-off period. CONFLICT RULE: If a user requests account deletion AND a refund simultaneously, do not process either request. Escalate to BILLING immediately.\n"
+        "4. Suspended accounts lose UI access and will experience 500 errors. If you check billing and see a 'suspended' status, you must escalate to SECURITY immediately."
     ),
 }
 
@@ -132,6 +121,7 @@ BILLING_RECORDS = {
     ],
     "USR003": [
         {"date": "2026-03-01", "amount": 99.99, "description": "Business Plan - Monthly"},
+        {"date": "2026-03-01", "amount": 99.99, "description": "Business Plan - Monthly (DUPLICATE)"},
         {"date": "2026-02-01", "amount": 99.99, "description": "Business Plan - Monthly"},
         {"date": "2025-11-15", "amount": 49.99, "description": "Enterprise Add-on"},
     ],
@@ -150,6 +140,7 @@ TASKS = [
     # Task 1 — Easy: Password reset
     {
         "difficulty": "easy",
+        "description": "Password reset",
         "ticket_text": (
             "Hi, I forgot my password and can't log into my account. "
             "My username is alice@example.com. Can you help me reset it? "
@@ -162,52 +153,52 @@ TASKS = [
         "correct_resolution_keywords": ["reset", "link", "email", "spam"],
         "correct_escalation_dept": None,
     },
-    # Task 2 — Medium: Refund past 30-day policy
+    # Task 2 — Medium: Duplicate Charge Identification
     {
         "difficulty": "medium",
+        "description": "Duplicate Charge Identification",
         "ticket_text": (
-            "I want a full refund for my Premium subscription. I was charged $29.99 "
-            "on March 1st but I haven't used the service since January. "
-            "My user ID is USR001. I think this is unfair since I forgot to cancel."
+            "Hello, I was checking my credit card statement and noticed I was "
+            "charged $99.99 twice on March 1st for my Business Plan. "
+            "Can you please refund the extra charge? My user ID is USR003."
+        ),
+        "user_id": "USR003",
+        "category": "billing",
+        "correct_action": "resolve",
+        "required_tools": ["read_ticket", "search_knowledge_base", "check_billing"],
+        "correct_resolution_keywords": ["refund", "duplicate", "processed", "issued", "extra"],
+        "correct_escalation_dept": None,
+    },
+    # Task 3 — Hard: Multi-Step Suspension Diagnosis
+    {
+        "difficulty": "hard",
+        "description": "Multi-Step Suspension Diagnosis",
+        "ticket_text": (
+            "I'm getting a 500 error every time I try to access my dashboard. "
+            "I've been a Premium member for months. My user ID is USR004. "
+            "Please fix this server issue immediately!"
+        ),
+        "user_id": "USR004",
+        "category": "account",
+        "correct_action": "escalate",
+        "required_tools": ["read_ticket", "check_billing", "search_knowledge_base"],
+        "correct_resolution_keywords": [],
+        "correct_escalation_dept": "security", # Must find that the user is 'suspended'
+    },
+    # Task 4 — Trap: Cross-Policy Conflict
+    {
+        "difficulty": "trap",
+        "description": "Cross-Policy Conflict",
+        "ticket_text": (
+            "I want to delete my account (USR001) immediately and get a refund "
+            "for my payment from 3 days ago. I'm moving to a competitor today."
         ),
         "user_id": "USR001",
         "category": "refund",
         "correct_action": "escalate",
         "required_tools": ["read_ticket", "check_billing", "search_knowledge_base"],
         "correct_resolution_keywords": [],
-        "correct_escalation_dept": "billing",
-    },
-    # Task 3 — Hard: Server 500 outage
-    {
-        "difficulty": "hard",
-        "ticket_text": (
-            "URGENT: Our entire team is getting HTTP 500 errors on the dashboard. "
-            "We are a Business plan customer (USR003) and this is affecting our "
-            "production workflow. We need this fixed IMMEDIATELY. "
-            "The errors started about 2 hours ago."
-        ),
-        "user_id": "USR003",
-        "category": "outage",
-        "correct_action": "escalate",
-        "required_tools": ["read_ticket", "search_knowledge_base"],
-        "correct_resolution_keywords": [],
-        "correct_escalation_dept": "engineering",
-    },
-    # Task 4 — Trap: Cannot be solved with available tools
-    {
-        "difficulty": "trap",
-        "ticket_text": (
-            "I need to transfer my account data to a completely different platform. "
-            "I want a full data export in CSV format including all my historical "
-            "analytics, custom integrations, and API logs from the last 3 years. "
-            "My user ID is USR002. Please process this immediately."
-        ),
-        "user_id": "USR002",
-        "category": "data_export",
-        "correct_action": "escalate",
-        "required_tools": ["read_ticket"],
-        "correct_resolution_keywords": [],
-        "correct_escalation_dept": "engineering",
+        "correct_escalation_dept": "billing", # Requires identifying the 14-day cooling-off conflict
     },
 ]
 
@@ -221,7 +212,7 @@ class SupportEnvironment(MCPEnvironment):
     based on correct tool usage patterns.
     """
 
-    SUPPORTS_CONCURRENT_SESSIONS: bool = True
+    SUPPORTS_CONCURRENT_SESSIONS: bool = False
 
     # ── CLASS-LEVEL shared state for stateless HTTP (REST) support ──
     _task_index: int = 0
@@ -229,6 +220,7 @@ class SupportEnvironment(MCPEnvironment):
     _episode_done: bool = False
     _trajectory_reward: float = 0.0
     _tools_used: list[str] = []
+    _queries_searched: list[str] = []
     _shared_state: Optional[State] = None
 
     def __init__(self):
@@ -248,10 +240,17 @@ class SupportEnvironment(MCPEnvironment):
         def search_knowledge_base(query: str) -> str:
             """Search the internal knowledge base for relevant policies."""
             cls._record_tool_use("search_knowledge_base")
+            cls._queries_searched.append(query.lower())
             query_lower = query.lower()
             results = []
             for key, text in KNOWLEDGE_BASE.items():
-                if any(word in query_lower for word in key.split("_")):
+                words = [w for w in key.split("_") if w]
+                if not words:
+                    continue
+                if len(words) == 1:
+                    if words[0] in query_lower:
+                        results.append(text)
+                elif all(w in query_lower for w in words):
                     results.append(text)
             if results:
                 return "\n\n---\n\n".join(results)
@@ -323,9 +322,10 @@ class SupportEnvironment(MCPEnvironment):
 
         cls._tools_used.append(tool_name)
         task = cls._current_task
+        is_first_use = cls._tools_used.count(tool_name) == 1
 
-        # +0.1 for using a tool that is in the required set
-        if tool_name in task["required_tools"]:
+        # +0.1 for the FIRST use of a tool in the required set (no double-counting)
+        if tool_name in task["required_tools"] and is_first_use:
             cls._trajectory_reward += 0.1
 
         # Extra +0.1 if read_ticket is the very first tool used
@@ -346,14 +346,12 @@ class SupportEnvironment(MCPEnvironment):
         cls._episode_done = True
         task = cls._current_task
 
-        # ── Penalty: resolving without checking required tools ──
-        if action_type == "resolve":
-            required = set(task["required_tools"])
-            used = set(cls._tools_used)
-            missing = required - used - {"resolve_ticket", "escalate_ticket"}
-            if missing:
-                # -0.2 for each required tool not used (hallucination penalty)
-                cls._trajectory_reward -= 0.2 * len(missing)
+        # ── Penalty: finishing without checking required tools ──
+        required = set(task["required_tools"])
+        used = set(cls._tools_used)
+        missing = required - used - {"resolve_ticket", "escalate_ticket"}
+        if missing:
+            cls._trajectory_reward -= 0.2 * len(missing)
 
         # ── Final score based on correct action ──
         correct_action = task["correct_action"]
@@ -362,7 +360,13 @@ class SupportEnvironment(MCPEnvironment):
             if action_type == "escalate":
                 correct_dept = task.get("correct_escalation_dept", "")
                 if department and correct_dept and department.lower() == correct_dept.lower():
-                    cls._trajectory_reward += 0.5  # correct department
+                    if task.get("difficulty") == "hard":
+                        if "check_billing" in cls._tools_used and "search_knowledge_base" in cls._tools_used:
+                            cls._trajectory_reward += 0.5
+                        else:
+                            cls._trajectory_reward += 0.3
+                    else:
+                        cls._trajectory_reward += 0.5  # correct department
                 else:
                     cls._trajectory_reward += 0.3  # right action, wrong dept
             elif action_type == "resolve":
@@ -377,6 +381,16 @@ class SupportEnvironment(MCPEnvironment):
         else:
             # Wrong action type entirely
             cls._trajectory_reward -= 0.3
+
+        # Conflict Awareness (Task 4)
+        if task.get("difficulty") == "trap":
+            searched_refund = any("refund" in q for q in cls._queries_searched)
+            searched_account = any("account" in q for q in cls._queries_searched)
+            if searched_refund ^ searched_account:
+                cls._trajectory_reward -= 0.2
+
+        if cls._shared_state and cls._shared_state.step_count > 3:
+            cls._trajectory_reward -= 0.05 * (cls._shared_state.step_count - 3)
 
         # Clamp final reward to [0.0, 1.0]
         cls._trajectory_reward = max(0.0, min(1.0, cls._trajectory_reward))
@@ -405,6 +419,7 @@ class SupportEnvironment(MCPEnvironment):
         cls._episode_done = False
         cls._trajectory_reward = 0.0
         cls._tools_used = []
+        cls._queries_searched = []
 
         cls._shared_state = State(
             episode_id=episode_id or str(uuid4()),

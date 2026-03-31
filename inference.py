@@ -4,81 +4,137 @@ import json
 import httpx
 import sys
 import time
+from pathlib import Path
+
 from dotenv import load_dotenv
 from openai import OpenAI
 
-# Load variables from .env
-load_dotenv(override=True) 
+# Only the real `.env` next to this file (not cwd, not `.env.example`).
+_ENV_PATH = Path(__file__).resolve().parent / ".env"
+if not _ENV_PATH.is_file():
+    print(f"❌ ERROR: Missing {_ENV_PATH}")
+    print("   Create that file and set ENV_URL, API_BASE_URL, MODEL_NAME, HF_TOKEN.")
+    sys.exit(1)
+load_dotenv(_ENV_PATH, override=True)
 
-# Verify API Key
-HF_TOKEN = os.getenv("HF_TOKEN")
-if not HF_TOKEN or "PASTE" in HF_TOKEN:
-    print("❌ ERROR: Your API key is missing from the .env file!")
+
+def _strip(s: str | None) -> str:
+    return (s or "").strip()
+
+
+_REQUIRED = ("HF_TOKEN", "ENV_URL", "API_BASE_URL", "MODEL_NAME")
+_missing = [k for k in _REQUIRED if not _strip(os.getenv(k))]
+if _missing:
+    print(f"❌ ERROR: {_ENV_PATH} is missing keys: {', '.join(_missing)}")
     sys.exit(1)
 
+HF_TOKEN = _strip(os.getenv("HF_TOKEN"))
+if "PASTE" in HF_TOKEN:
+    print("❌ ERROR: Replace placeholder HF_TOKEN in .env.")
+    sys.exit(1)
+
+ENV_URL = _strip(os.getenv("ENV_URL")).rstrip("/")
+API_BASE_URL = _strip(os.getenv("API_BASE_URL"))
+MODEL_NAME = _strip(os.getenv("MODEL_NAME"))
+
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration (defaults below are optional tuning only)
 # ---------------------------------------------------------------------------
 
-ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
-API_BASE_URL = os.getenv("API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
-
-# Updated fallback in inference.py
-MODEL_NAME = os.getenv("MODEL_NAME", "gemini-3.1-flash-lite-preview")
 NUM_TASKS = 4
 MAX_STEPS_PER_TASK = 10
 
-SYSTEM_PROMPT = """You are an expert customer support triage agent. 
+# Wall-clock budget for the whole run (default 20 minutes for hackathon validators)
+INFERENCE_MAX_SECONDS = int(os.getenv("INFERENCE_MAX_SECONDS", "1200"))
+
+
+def _step_delay_seconds() -> int:
+    """Delay between steps (after step 1). Override with STEP_DELAY_SECONDS; else model-based default."""
+    override = os.getenv("STEP_DELAY_SECONDS")
+    if override is not None and override.strip() != "":
+        return max(0, int(override))
+    return 30 if "pro" in MODEL_NAME.lower() else 7
+
+
+SYSTEM_PROMPT = """You are an expert customer support triage agent.
 Respond ONLY with a tool call. Do not explain your reasoning. Do not say 'I understand'.
 
 TOOLS:
 - `read_ticket()`: Read the ticket. (ALWAYS START HERE)
 - `search_knowledge_base(query)`: Search policies.
-- `check_billing(user_id)`: Check user status.
-- `escalate_ticket(department)`: Use if tools don't solve it (billing, engineering, security).
-- `resolve_ticket(message)`: Final answer to user.
+- `check_billing(user_id)`: Check user billing and transactions (use when the ticket needs billing data).
+- `escalate_ticket(department)`: Escalate to billing, engineering, or security.
+- `resolve_ticket(message)`: Send the final message to the customer and close the ticket.
 
-CRITICAL RULES:
-1. PASSWORD RESETS: Search the knowledge base for "password reset". Do NOT check billing. You MUST call `resolve_ticket(message="I have sent a reset link to your email. Please check your spam folder.")`.
-2. REFUNDS: Search KB, then check billing using the specific USRxxx ID. If the transaction is older than 30 days, `escalate_ticket(department='billing')`.
-3. OUTAGES (500 errors): Search KB for "outage", then `escalate_ticket(department='engineering')`.
-4. TRAPS / UNKNOWN: `escalate_ticket(department='engineering')`.
+PROCEDURE BY TICKET TYPE — use the tools required for that type (do not skip them):
+- Password / login reset: `read_ticket` → `search_knowledge_base` (e.g. "password reset") → `resolve_ticket`. Do NOT call `check_billing` unless the ticket asks about charges or billing.
+- Refund / billing disputes: `read_ticket` → `search_knowledge_base` (e.g. refund policy) → `check_billing` with the USRxxx from the ticket → then `escalate_ticket` or `resolve_ticket` per policy.
+- Outages / errors (e.g. HTTP 500): `read_ticket` → `search_knowledge_base` (e.g. outage) → `escalate_ticket(department='engineering')`.
+- Unknown or impossible requests (no policy covers it): `read_ticket` → `search_knowledge_base` if relevant → `escalate_ticket(department='engineering')`.
+
+For outages and policy gaps you MUST call `escalate_ticket` to hand off; do not use `resolve_ticket` only to say you escalated.
 """
 
+
 def main():
+    run_start = time.time()
+    step_delay = _step_delay_seconds()
+
+    def time_elapsed() -> float:
+        return time.time() - run_start
+
+    def time_budget_exceeded() -> bool:
+        if time_elapsed() >= INFERENCE_MAX_SECONDS:
+            print(
+                f"❌ Stopping: INFERENCE_MAX_SECONDS ({INFERENCE_MAX_SECONDS}s) exceeded. "
+                "Set STEP_DELAY_SECONDS=0 or raise INFERENCE_MAX_SECONDS if needed."
+            )
+            return True
+        return False
+
     # Wait for the environment server to wake up
     print("⏳ Waiting for environment server to start...")
+    _server_ok = False
     for _ in range(10):
         try:
             httpx.get(f"{ENV_URL}/docs", timeout=2.0)
+            _server_ok = True
             break
         except httpx.RequestError:
             time.sleep(2)
+    if not _server_ok:
+        print("❌ ERROR: Environment server is not reachable after 10 retries!")
+        sys.exit(1)
     print("✅ Environment server is reachable!")
-    print(f"🚀 Starting Stabilized Inference with {MODEL_NAME}...")
-    print(f"⏳ Throttling enabled (7s per step) to respect Free Tier limits.\n")
-    
+    print(f"🚀 Starting inference with {MODEL_NAME}...")
+    print(
+        f"⏳ Step delay: {step_delay}s between steps (set STEP_DELAY_SECONDS to override). "
+        f"Wall budget: {INFERENCE_MAX_SECONDS}s (INFERENCE_MAX_SECONDS).\n"
+    )
+
     client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
-    
+
     openai_tools = [
         {"type": "function", "function": {"name": "read_ticket", "description": "Read ticket.", "parameters": {"type": "object", "properties": {}}}},
         {"type": "function", "function": {"name": "search_knowledge_base", "description": "Search policies.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
         {"type": "function", "function": {"name": "check_billing", "description": "Check billing.", "parameters": {"type": "object", "properties": {"user_id": {"type": "string"}}, "required": ["user_id"]}}},
         {"type": "function", "function": {"name": "escalate_ticket", "description": "Escalate ticket.", "parameters": {"type": "object", "properties": {"department": {"type": "string"}}, "required": ["department"]}}},
-        {"type": "function", "function": {"name": "resolve_ticket", "description": "Resolve ticket.", "parameters": {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]}}}
+        {"type": "function", "function": {"name": "resolve_ticket", "description": "Resolve ticket.", "parameters": {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]}}},
     ]
 
     total_rewards = []
 
     for task_num in range(1, NUM_TASKS + 1):
+        if time_budget_exceeded():
+            break
+
         print(f"\n{'='*60}\n  TASK {task_num}\n{'='*60}")
-        
-        # Reset Environment
-        httpx.post(f"{ENV_URL}/reset", timeout=10.0)
-        
+
+        httpx.post(f"{ENV_URL}/reset", timeout=10.0).raise_for_status()
+
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": "New ticket arrived. Begin."}
+            {"role": "user", "content": "New ticket arrived. Begin."},
         ]
 
         done = False
@@ -86,64 +142,114 @@ def main():
         final_reward = 0.0
 
         while not done and step_count < MAX_STEPS_PER_TASK:
+            if time_budget_exceeded():
+                break
+
             step_count += 1
-            
-            # --- RATE LIMIT PROTECTION ---
+
             if step_count > 1:
-                print(f"  ⏳ Waiting 7s to prevent 429 quota error...")
-                time.sleep(7)
+                print(f"  ⏳ Waiting {step_delay}s before next step...")
+                time.sleep(step_delay)
 
             print(f"  --- Step {step_count} ---")
-            
-            try:
-                response = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=messages,
-                    tools=openai_tools,
-                    tool_choice="auto",
-                    temperature=0.0 # Strictness
-                )
-            except Exception as e:
-                print(f"  ⚠ API error: {e}")
-                if "429" in str(e):
-                    print("  🚨 Rate limit hit. Cooling down for 30s...")
-                    time.sleep(30)
-                break
-            
-            response_message = response.choices[0].message
-            messages.append(response_message)
-            
-            if response_message.tool_calls:
-                for tool_call in response_message.tool_calls:
-                    name = tool_call.function.name
-                    args = json.loads(tool_call.function.arguments or "{}")
-                    
-                    print(f"  🔧 Tool: {name}({json.dumps(args)})")
-                    
-                    # Call Server
-                    res = httpx.post(f"{ENV_URL}/step", json={"action": {"tool_name": name, "arguments": args}}, timeout=30.0).json()
-                    
-                    obs = res.get("observation", {})
-                    done = res.get("done", False)
-                    reward = res.get("reward", 0.0)
-                    
-                    tool_out = str(obs.get("result", {}).get("data", obs.get("result", "Success")))
-                    print(f"  📋 Result: {tool_out[:100]}...")
-                    print(f"  💰 Reward: {reward}")
-                    
-                    messages.append({"role": "tool", "tool_call_id": tool_call.id, "name": name, "content": tool_out})
-                    
-                    if done:
-                        final_reward = reward
-                        print(f"  ✅ Complete! Final Reward: {final_reward}")
+
+            api_success = False
+            for attempt in range(3):
+                try:
+                    response = client.chat.completions.create(
+                        model=MODEL_NAME,
+                        messages=messages,
+                        tools=openai_tools,
+                        tool_choice="required" if "gemini" not in MODEL_NAME.lower() else "auto",
+                        temperature=0.0,
+                    )
+                    api_success = True
+                    break
+                except Exception as e:
+                    print(f"  ⚠ API error on attempt {attempt + 1}: {e}")
+                    if "429" in str(e) or "quota" in str(e).lower() or "503" in str(e):
+                        print("  🚨 Rate limit/Server busy. Cooling down for 30s...")
+                        time.sleep(30)
+                    else:
                         break
+
+            if not api_success:
+                print("  ❌ API failed after retries. Aborting task.")
+                break
+
+            response_message = response.choices[0].message
+
+            if response_message.tool_calls and len(response_message.tool_calls) > 1:
+                first_tc = response_message.tool_calls[0]
+                messages.append({
+                    "role": "assistant",
+                    "content": response_message.content or None,
+                    "tool_calls": [{
+                        "id": first_tc.id,
+                        "type": "function",
+                        "function": {"name": first_tc.function.name, "arguments": first_tc.function.arguments},
+                    }],
+                })
             else:
-                print(f"  🤖 Agent chatted: {response_message.content[:50]}...")
+                messages.append(response_message)
+
+            if response_message.tool_calls:
+                tool_call = response_message.tool_calls[0]
+                name = tool_call.function.name
+
+                try:
+                    raw_args = tool_call.function.arguments or "{}"
+                    args = json.loads(raw_args)
+                    if args is None:
+                        args = {}
+                except json.JSONDecodeError:
+                    print(f"  ⚠ Model provided invalid JSON: {tool_call.function.arguments}")
+                    args = {}
+
+                print(f"  🔧 Tool: {name}({json.dumps(args)})")
+
+                step_resp = httpx.post(
+                    f"{ENV_URL}/step",
+                    json={"action": {"tool_name": name, "arguments": args}},
+                    timeout=30.0,
+                )
+                step_resp.raise_for_status()
+                res = step_resp.json()
+
+                res_data = res.get("observation")
+                if res_data is None:
+                    tool_out = "Error: Environment returned no data. Your tool arguments might be incorrect."
+                else:
+                    result_obj = res_data.get("result", "Success")
+                    if isinstance(result_obj, dict):
+                        tool_out = str(result_obj.get("data", result_obj))
+                    else:
+                        tool_out = str(result_obj)
+
+                done = res.get("done", False)
+                reward = res.get("reward", 0.0)
+                print(f"  📋 Result: {tool_out[:100]}...")
+                print(f"  💰 Reward: {round(reward, 2)}")
+
+                messages.append({"role": "tool", "tool_call_id": tool_call.id, "name": name, "content": tool_out})
+
+                if done:
+                    final_reward = reward
+                    print(f"  ✅ Complete! Final Reward: {round(final_reward, 2)}")
+                    break
+            else:
+                safe_content = str(response_message.content or "No text provided.")
+                print(f"  🤖 Agent chatted: {safe_content[:50]}...")
                 messages.append({"role": "user", "content": "Focus. Use a tool to progress."})
 
         total_rewards.append(final_reward)
 
-    print(f"\n{'='*60}\n  SUMMARY: Average Reward: {sum(total_rewards)/len(total_rewards):.2f}\n{'='*60}")
+    if not total_rewards:
+        print("\n❌ No tasks completed.")
+        sys.exit(1)
+
+    print(f"\n{'='*60}\n  SUMMARY: Average Reward: {round(sum(total_rewards)/len(total_rewards), 2)}\n{'='*60}")
+
 
 if __name__ == "__main__":
     main()
