@@ -14,39 +14,40 @@ tags:
 
 # Customer Support Triage Environment
 
-A real-world Reinforcement Learning (RL) environment built on the OpenEnv spec. This environment simulates a Level 1 Customer Support Agent workflow, requiring an AI model to use tools to triage, diagnose, and resolve customer tickets.
+A real-world Reinforcement Learning (RL) environment built on the OpenEnv spec. This environment simulates a Level 1 Customer Support Agent workflow, requiring an AI model to use tools to triage, diagnose, and resolve customer tickets while utilizing strict Chain of Thought (CoT) reasoning.
 
 ## Benchmark Validation
 
-This environment has been cross-validated using proprietary, open-source, and frontier models. It successfully filters for both logical reasoning and strict tool adherence across different reasoning tiers.
+This environment has been cross-validated using proprietary, open-source, and frontier models. It successfully filters for both logical reasoning and strict tool adherence across different reasoning tiers. 
+
+*Note: To ensure a baseline of agentic behavior, `tool_choice` is dynamically set to `"required"` for all non-Gemini models.*
 
 | Model | Tool Choice | Avg Reward | Tier | Performance Notes |
 | :--- | :---: | :---: | :---: | :--- |
-| **Gemini 3.1 Flash-Lite** | `auto` | **0.80** | SOTA Proprietary | 100% logic and SOP adherence. |
-| **Qwen 2.5 7B Instruct** | `auto` | **0.80** | SOTA Open-Source | Identical performance to Gemini. |
-| **Llama 3.1 8B** | `required`| **0.55** | Mid-Tier Baseline | Follows tools but fails complex date math. |
-| **Llama 3.3 70B** | `auto` | **0.50** | Frontier Open | **RLHF Efficiency Bias:** Skipped required tools. |
-| **Llama 3.1 8B** | `auto` | **0.00** | Legacy | Fails tool adherence (chatted JSON as text). |
+| **Gemini 3.1 Flash-Lite** | `auto` | **0.80** | SOTA Proprietary | 100% logic and SOP adherence. Flawless Chain of Thought. |
+| **Qwen 2.5 7B Instruct** | `required` | **0.55** | SOTA Open-Source | Failed complex routing; escalated instead of resolving duplicate charges. |
+| **Llama 3.3 70B** | `required` | **0.45** | Frontier Open | **RLHF Efficiency Bias:** Skipped mandatory policy checks entirely. |
+| **Llama 3.1 8B** | `required` | **0.44** | Mid-Tier Baseline | Hallucinated KB queries, trapped in loops, failed basic task resolution. |
 
 ---
 
 ## Comparative Analysis
 
-### 1. Gemini vs. Qwen (The 0.80 Trajectories)
-While both SOTA models reached the same final score, their trajectories showed subtle differences in semantic reasoning:
-* **Query Precision:** Gemini 3.1 Flash-Lite demonstrated slightly higher verbosity in searches (e.g., searching for `"data export policy"`), whereas Qwen 2.5 7B optimized for keyword efficiency (`"data export"`).
-* **Logic Consistency:** Both models successfully navigated the **"Trap"** (recognizing a "No Result" from the KB and escalating to Engineering) and the **"Date Math"** (correctly parsing a March 1st transaction against the system clock to trigger a Billing Escalation).
+### 1. The 0.80 Ceiling (Gemini 3.1 Flash-Lite)
+Gemini was the only model to successfully navigate the entire gauntlet. Its success was driven by its ability to utilize the `thought` parameter effectively. For example, in Task 3 (The Suspension Trap), Gemini's internal thought explicitly connected the 500 error to the `suspended` status found in billing, leading it to search the exact correct policy and escalate to `SECURITY`. 
 
-### 2. RLHF Efficiency Bias & The "Lazy Agent" (Llama 3.3 70B)
-Testing the frontier-class Llama 3.3 70B (via Groq) revealed a fascinating "Overconfidence Penalty." Despite its high intelligence, the model achieved a lower score (0.50) due to **RLHF Efficiency Bias**:
-* **Shortcutting SOP:** The model attempted to resolve tickets immediately based on its internal knowledge of general support rules, skipping the mandatory `search_knowledge_base` and `check_billing` steps required by the environment.
-* **Tool Misalignment:** In outage tasks, the model used the `resolve_ticket` tool to *inform* the user it was escalating, rather than physically calling the `escalate_ticket` tool to move the state machine forward.
-* **Observation:** This proves the environment is robust enough to catch "helpful but unaligned" behavior in massive models that prioritize speed/helpfulness over strict protocol adherence.
+### 2. Multi-Hop Fragility (Qwen 2.5 7B)
+While Qwen is a highly capable model, it suffered a significant drop in score (0.55) due to multi-hop fragility:
+* **Task 2 (Duplicate Charge):** The model correctly found the duplicate charge but defaulted to its base instinct of escalating billing issues (`escalate_ticket`) instead of following the Knowledge Base policy to issue an immediate refund (`resolve_ticket`).
+* **Task 3 (Suspension):** It successfully identified that the user was suspended, but fell back on the heuristic that "500 errors go to Engineering" instead of routing to the mandated Security department.
 
-### 3. Llama 3.1 8B Ablation Study (The 0.55 Trajectory)
-Testing Llama 3.1 8B revealed the environment's ability to expose logical gaps in mid-tier models when forced into tool compliance (`tool_choice="required"`):
-* **Task 2 (Refund Logic Failure):** The model correctly searched the KB and checked billing for the user. However, it completely ignored the "30-day policy limit" and attempted to resolve the ticket with a refund anyway, triggering the environment's penalty logic.
-* **Task 4 (The Trap):** When faced with a missing policy, it correctly chose to escalate but selected the wrong department (`billing` instead of `engineering`), demonstrating a lower semantic understanding of edge-case routing.
+### 3. RLHF Efficiency Bias & The "Lazy Agent" (Llama 3.3 70B)
+Testing the frontier-class Llama 3.3 70B revealed a fascinating "Overconfidence Penalty," resulting in a score of 0.45:
+* **Shortcutting SOP:** Even with tools required, the model completely skipped the mandatory `search_knowledge_base` tool across almost all tasks. It attempted to resolve or escalate tickets immediately based on its internal pre-trained knowledge of general support rules.
+* **Observation:** This proves the environment is robust enough to catch "helpful but unaligned" behavior in massive models that prioritize speed over strict protocol adherence.
+
+### 4. Mid-Tier Looping (Llama 3.1 8B)
+Llama 3.1 8B (0.44) demonstrated the limits of smaller models in strict environments. In Task 2, it scored a flat **0.00** by failing to comprehend the duplicate charge and incorrectly escalating. In Task 4, it got trapped in a repetitive loop, repeatedly querying the Knowledge Base for "escalation path" and finding nothing, rather than synthesizing the conflicting policies.
 
 ---
 
@@ -61,12 +62,12 @@ Customer support triage is a massive bottleneck for modern SaaS companies. This 
 
 ## Action & Observation Spaces
 
-All interactions happen through strictly typed MCP Tools (Action Space):
-* `read_ticket()`: Returns the customer's issue text. (ALWAYS START HERE).
-* `search_knowledge_base(query)`: Returns policy text based on semantic keywords.
-* `check_billing(user_id)`: Returns recent transactions and account status.
-* `escalate_ticket(department)`: Ends the episode, routing to a human team (Billing, Engineering, Security).
-* `resolve_ticket(message)`: Ends the episode with a direct customer response.
+All interactions happen through strictly typed MCP Tools (Action Space). **Crucially, every tool requires a mandatory `thought` parameter** to force step-by-step reasoning before execution:
+* `read_ticket(thought)`: Returns the customer's issue text. (ALWAYS START HERE).
+* `search_knowledge_base(thought, query)`: Returns policy text based on semantic keywords.
+* `check_billing(thought, user_id)`: Returns recent transactions and account status.
+* `escalate_ticket(thought, department)`: Ends the episode, routing to a human team (Billing, Engineering, Security).
+* `resolve_ticket(thought, message)`: Ends the episode with a direct customer response.
 
 **Observation Space:** Returns JSON strings containing the tool execution results, current step count, and partial trajectory rewards. This allows the model to "see" the output of its actions in real-time.
 
@@ -79,20 +80,20 @@ The environment dynamically cycles through 4 tasks of increasing difficulty upon
 | Task | Difficulty | Objective | Correct Action |
 |------|------------|-----------|----------------|
 | **1. Password Reset** | Easy | User forgot password. No DB check needed. | `resolve_ticket` with specific keywords (link, spam, etc.) |
-| **2. Refund Request** | Medium | User wants a refund for a charge >30 days old. | `escalate_ticket` to Billing (Policy Violation). |
-| **3. Server Outage** | Hard | User reports a 500 error affecting production. | `escalate_ticket` to Engineering immediately. |
-| **4. Data Export** | Trap | Policy doesn't exist for the requested data type. | `escalate_ticket` (Agent must recognize its own limits). |
+| **2. Duplicate Charge** | Medium | User reports a double charge on their statement. | `resolve_ticket` directly after verifying array data. |
+| **3. Suspension Diagnosis** | Hard | User reports a 500 error; DB shows suspended status. | `escalate_ticket` to **Security**. |
+| **4. Cross-Policy Conflict**| Trap | User requests account deletion AND a refund. | `escalate_ticket` to **Billing** (Policy Conflict). |
 
 **Reward Function:**
 The environment provides dense, partial trajectory rewards to guide the agent:
 * **+0.1 to +0.2:** For starting by reading the ticket and using the correct initial tool sequence.
 * **+0.3 to +0.5:** For selecting the correct terminal action (Resolve vs. Escalate) and the correct department.
-* **-0.2 to -0.5 (Penalty):** For hallucinating a resolution that violates searched policies or skipping mandatory data checks.
+* **-0.2 to -0.5 (Penalty):** For hallucinating a resolution that violates searched policies, skipping mandatory data checks, or missing cross-policy conflicts.
 
 ---
 
 ## Robustness Testing
-To ensure the environment successfully filters for intelligence, we tested "Low-Reasoning" models without forced tool compliance. As demonstrated by the Llama 3.1 8B (`auto`) score of **0.00**, models lacking native agentic structure will consistently fail due to loop-trapping. This confirms that solving the environment requires sophisticated logical branching, strict JSON adherence, and a baseline reward of 0.80 requires 100% adherence to the provided SOP.
+To ensure the environment successfully filters for intelligence, we tested models utilizing a forced Chain of Thought (`thought` parameter). Because `tool_choice` is dynamically set to `"required"` for open-source and API models, the benchmark isolates logical routing from basic tool-calling syntax errors. As demonstrated by the scoring spread, models lacking native multi-hop reasoning or strict instruction-following will consistently fail due to heuristic biases or loop-trapping. This confirms that solving the environment requires sophisticated logical branching, and a baseline reward of >0.80 requires 100% adherence to the provided SOP.
 
 ## Setup & Usage
 

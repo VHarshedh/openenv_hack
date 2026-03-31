@@ -57,22 +57,21 @@ def _step_delay_seconds() -> int:
 
 
 SYSTEM_PROMPT = """You are an expert customer support triage agent.
-Respond ONLY with a tool call. Do not explain your reasoning. Do not say 'I understand'.
+Respond ONLY with a tool call. Do not explain your reasoning outside of the tool call. 
 
 TOOLS:
-- `read_ticket()`: Read the ticket. (ALWAYS START HERE)
-- `search_knowledge_base(query)`: Search policies.
-- `check_billing(user_id)`: Check user billing and transactions (use when the ticket needs billing data).
-- `escalate_ticket(department)`: Escalate to billing, engineering, or security.
-- `resolve_ticket(message)`: Send the final message to the customer and close the ticket.
+- `read_ticket(thought)`: Read the ticket. (ALWAYS START HERE)
+- `search_knowledge_base(thought, query)`: Search policies.
+- `check_billing(thought, user_id)`: Check user billing and transactions.
+- `escalate_ticket(thought, department)`: Escalate to billing, engineering, or security.
+- `resolve_ticket(thought, message)`: Send the final message to the customer.
 
-PROCEDURE BY TICKET TYPE — use the tools required for that type (do not skip them):
-- Password / login reset: `read_ticket` → `search_knowledge_base` (e.g. "password reset") → `resolve_ticket`. Do NOT call `check_billing` unless the ticket asks about charges or billing.
-- Refund / billing disputes: `read_ticket` → `search_knowledge_base` (e.g. refund policy) → `check_billing` with the USRxxx from the ticket → then `escalate_ticket` or `resolve_ticket` per policy.
-- Outages / errors (e.g. HTTP 500): `read_ticket` → `search_knowledge_base` (e.g. outage) → `escalate_ticket(department='engineering')`.
-- Unknown or impossible requests (no policy covers it): `read_ticket` → `search_knowledge_base` if relevant → `escalate_ticket(department='engineering')`.
-
-For outages and policy gaps you MUST call `escalate_ticket` to hand off; do not use `resolve_ticket` only to say you escalated.
+CRITICAL INSTRUCTIONS:
+Every tool requires a `thought` parameter. You MUST use this parameter to think step-by-step BEFORE executing the action. 
+1. Identify all distinct requests in the user's message (e.g., refund AND deletion).
+2. Note any specific states found in the billing database (e.g., 'suspended').
+3. Cross-reference these findings against the Knowledge Base to check for conflicting rules or required escalation paths.
+4. Do not call `resolve_ticket` or `escalate_ticket` until you have verified your logic against the KB.
 """
 
 
@@ -115,11 +114,11 @@ def main():
     client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
     openai_tools = [
-        {"type": "function", "function": {"name": "read_ticket", "description": "Read ticket.", "parameters": {"type": "object", "properties": {}}}},
-        {"type": "function", "function": {"name": "search_knowledge_base", "description": "Search policies.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
-        {"type": "function", "function": {"name": "check_billing", "description": "Check billing.", "parameters": {"type": "object", "properties": {"user_id": {"type": "string"}}, "required": ["user_id"]}}},
-        {"type": "function", "function": {"name": "escalate_ticket", "description": "Escalate ticket.", "parameters": {"type": "object", "properties": {"department": {"type": "string"}}, "required": ["department"]}}},
-        {"type": "function", "function": {"name": "resolve_ticket", "description": "Resolve ticket.", "parameters": {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]}}},
+        {"type": "function", "function": {"name": "read_ticket", "description": "Read ticket.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}}, "required": ["thought"]}}},
+        {"type": "function", "function": {"name": "search_knowledge_base", "description": "Search policies.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}, "query": {"type": "string"}}, "required": ["thought", "query"]}}},
+        {"type": "function", "function": {"name": "check_billing", "description": "Check billing.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}, "user_id": {"type": "string"}}, "required": ["thought", "user_id"]}}},
+        {"type": "function", "function": {"name": "escalate_ticket", "description": "Escalate ticket.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}, "department": {"type": "string"}}, "required": ["thought", "department"]}}},
+        {"type": "function", "function": {"name": "resolve_ticket", "description": "Resolve ticket.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}, "message": {"type": "string"}}, "required": ["thought", "message"]}}},
     ]
 
     total_rewards = []

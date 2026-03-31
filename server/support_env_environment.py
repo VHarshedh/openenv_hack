@@ -231,14 +231,21 @@ class SupportEnvironment(MCPEnvironment):
         mcp = FastMCP("support_env")
 
         @mcp.tool
-        def read_ticket() -> str:
-            """Read the current customer support ticket."""
+        def read_ticket(thought: str) -> str:
+            """Read the current customer support ticket.
+            Args:
+                thought: Briefly explain why you need to read the ticket.
+            """
             cls._record_tool_use("read_ticket")
             return cls._current_task["ticket_text"]
 
         @mcp.tool
-        def search_knowledge_base(query: str) -> str:
-            """Search the internal knowledge base for relevant policies."""
+        def search_knowledge_base(thought: str, query: str) -> str:
+            """Search the internal knowledge base for relevant policies.
+            Args:
+                thought: Explain what specific policy or keywords you are looking for based on the ticket.
+                query: The exact keywords to search.
+            """
             cls._record_tool_use("search_knowledge_base")
             cls._queries_searched.append(query.lower())
             query_lower = query.lower()
@@ -260,8 +267,12 @@ class SupportEnvironment(MCPEnvironment):
             )
 
         @mcp.tool
-        def check_billing(user_id: str) -> str:
-            """Check a user's billing history and recent transactions."""
+        def check_billing(thought: str, user_id: str) -> str:
+            """Check a user's billing history and recent transactions.
+            Args:
+                thought: Explain why you are checking billing and what specific data you hope to find.
+                user_id: The ID of the user.
+            """
             cls._record_tool_use("check_billing")
             user = USER_DATABASE.get(user_id)
             if not user:
@@ -282,8 +293,12 @@ class SupportEnvironment(MCPEnvironment):
             return "\n".join(lines)
 
         @mcp.tool
-        def escalate_ticket(department: str) -> str:
-            """Escalate the ticket to a specialized department."""
+        def escalate_ticket(thought: str, department: str) -> str:
+            """Escalate the ticket to a specialized department.
+            Args:
+                thought: Step-by-step reasoning evaluating all KB rules, checking for cross-policy conflicts, and justifying this specific department.
+                department: The department to escalate to (billing, engineering, security).
+            """
             cls._record_tool_use("escalate_ticket")
             cls._finalize_episode("escalate", department=department)
             ref = str(uuid4())[:8].upper()
@@ -294,8 +309,12 @@ class SupportEnvironment(MCPEnvironment):
             )
 
         @mcp.tool
-        def resolve_ticket(message: str) -> str:
-            """Resolve the ticket with a response message to the customer."""
+        def resolve_ticket(thought: str, message: str) -> str:
+            """Resolve the ticket with a response message to the customer.
+            Args:
+                thought: Verify that all parts of the user's request have been addressed according to the KB before resolving.
+                message: The final message sent to the user.
+            """
             cls._record_tool_use("resolve_ticket")
             cls._finalize_episode("resolve", message=message)
             ref = str(uuid4())[:8].upper()
