@@ -12,7 +12,18 @@ for i in range(1, 6):
         httpx.post(f"{BASE}/reset", timeout=5).raise_for_status()
         
         # Step: Read ticket to see what task we are on
-        r = httpx.post(f"{BASE}/step", json={"action": {"type": "call_tool", "tool_name": "read_ticket", "arguments": {}}}, timeout=5)
+        # ADDED: "thought" parameter to satisfy the updated FastMCP tool schema
+        payload = {
+            "action": {
+                "type": "call_tool", 
+                "tool_name": "read_ticket", 
+                "arguments": {
+                    "thought": "Reading ticket to verify task cycle."
+                }
+            }
+        }
+        
+        r = httpx.post(f"{BASE}/step", json=payload, timeout=5)
         r.raise_for_status()
         data = r.json()
         

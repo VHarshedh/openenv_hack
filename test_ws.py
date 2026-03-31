@@ -2,7 +2,7 @@
 Integration test for support_env using the WebSocket client.
 
 Verifies that trajectory rewards accumulate correctly across steps
-for all 4 task difficulty levels.
+for all 4 task difficulty levels, including strict Chain of Thought constraints.
 
 Usage (with server already running on :8000):
     PYTHONPATH=../src:../envs python test_ws.py
@@ -57,14 +57,14 @@ def run_all_tests():
         print(f"  Difficulty: {meta.get('difficulty', '?')}")
 
         # Step 1: read_ticket (+0.1 required + 0.1 first = 0.2)
-        sr = env.step(CallToolAction(tool_name="read_ticket", arguments={}))
+        sr = env.step(CallToolAction(tool_name="read_ticket", arguments={"thought": "Read the new ticket."}))
         print(f"  read_ticket → reward={sr.reward}, done={sr.done}")
         print(f"    Text: {extract_text(sr)[:80]}...")
 
         # Step 2: search_knowledge_base (+0.1 required = 0.3)
         sr = env.step(CallToolAction(
             tool_name="search_knowledge_base",
-            arguments={"query": "password reset"},
+            arguments={"thought": "Look up password reset.", "query": "password reset"},
         ))
         print(f"  search_kb → reward={sr.reward}, done={sr.done}")
 
@@ -72,8 +72,8 @@ def run_all_tests():
         sr = env.step(CallToolAction(
             tool_name="resolve_ticket",
             arguments={
-                "message": "I've sent a password reset link to your email. "
-                "Please check your spam folder. The link will expire in 24 hours."
+                "thought": "Resolving with all required keywords.",
+                "message": "I have sent a password reset link to your email. Please check your spam folder."
             },
         ))
         print(f"  resolve → reward={sr.reward:.2f}, done={sr.done}")
@@ -82,90 +82,111 @@ def run_all_tests():
         results.append(("Task 1 (easy)", sr.reward, sr.done))
 
         # ═══════════════════════════════════════════════
-        # TASK 2 — Medium: Refund (correct: escalate to billing)
+        # TASK 2 — Medium: Duplicate Charge (correct: resolve)
         # ═══════════════════════════════════════════════
         print(f"\n{'═' * 50}")
-        print("TASK 2: Medium — Refund Past 30-Day Policy")
+        print("TASK 2: Medium — Duplicate Charge Identification")
         print("═" * 50)
 
         r = env.reset()
         meta = getattr(r.observation, "metadata", {}) or {}
         print(f"  Difficulty: {meta.get('difficulty', '?')}")
 
-        sr = env.step(CallToolAction(tool_name="read_ticket", arguments={}))
+        sr = env.step(CallToolAction(tool_name="read_ticket", arguments={"thought": "Read the new ticket."}))
         print(f"  read_ticket → reward={sr.reward}, done={sr.done}")
 
         sr = env.step(CallToolAction(
-            tool_name="check_billing", arguments={"user_id": "USR001"}
-        ))
-        print(f"  check_billing → reward={sr.reward}, done={sr.done}")
-
-        sr = env.step(CallToolAction(
             tool_name="search_knowledge_base",
-            arguments={"query": "refund policy"},
+            arguments={"thought": "Look up duplicate charges.", "query": "duplicate charge"},
         ))
         print(f"  search_kb → reward={sr.reward}, done={sr.done}")
 
         sr = env.step(CallToolAction(
-            tool_name="escalate_ticket", arguments={"department": "billing"}
+            tool_name="check_billing", arguments={"thought": "Check array for duplicate.", "user_id": "USR003"}
         ))
-        print(f"  escalate(billing) → reward={sr.reward:.2f}, done={sr.done}")
+        print(f"  check_billing → reward={sr.reward}, done={sr.done}")
+
+        sr = env.step(CallToolAction(
+            tool_name="resolve_ticket",
+            arguments={
+                "thought": "Found the duplicate, processing refund.",
+                "message": "I have processed a refund for the extra duplicate charge that was issued."
+            },
+        ))
+        print(f"  resolve → reward={sr.reward:.2f}, done={sr.done}")
         meta = getattr(sr.observation, "metadata", {}) or {}
         print(f"    tools_used: {meta.get('tools_used', [])}")
         results.append(("Task 2 (medium)", sr.reward, sr.done))
 
         # ═══════════════════════════════════════════════
-        # TASK 3 — Hard: Server Outage (correct: escalate to engineering)
+        # TASK 3 — Hard: Suspension (correct: escalate to security)
         # ═══════════════════════════════════════════════
         print(f"\n{'═' * 50}")
-        print("TASK 3: Hard — Server 500 Outage")
+        print("TASK 3: Hard — Multi-Step Suspension Diagnosis")
         print("═" * 50)
 
         r = env.reset()
         meta = getattr(r.observation, "metadata", {}) or {}
         print(f"  Difficulty: {meta.get('difficulty', '?')}")
 
-        sr = env.step(CallToolAction(tool_name="read_ticket", arguments={}))
+        sr = env.step(CallToolAction(tool_name="read_ticket", arguments={"thought": "Read the new ticket."}))
         print(f"  read_ticket → reward={sr.reward}, done={sr.done}")
 
         sr = env.step(CallToolAction(
+            tool_name="check_billing", arguments={"thought": "Check if user has billing issues.", "user_id": "USR004"}
+        ))
+        print(f"  check_billing → reward={sr.reward}, done={sr.done}")
+
+        sr = env.step(CallToolAction(
             tool_name="search_knowledge_base",
-            arguments={"query": "outage server error"},
+            arguments={"thought": "Look up suspended accounts.", "query": "suspended account error"},
         ))
         print(f"  search_kb → reward={sr.reward}, done={sr.done}")
 
         sr = env.step(CallToolAction(
-            tool_name="escalate_ticket", arguments={"department": "engineering"}
+            tool_name="escalate_ticket", arguments={"thought": "Suspension found, routing to security.", "department": "security"}
         ))
-        print(f"  escalate(engineering) → reward={sr.reward:.2f}, done={sr.done}")
+        print(f"  escalate(security) → reward={sr.reward:.2f}, done={sr.done}")
         meta = getattr(sr.observation, "metadata", {}) or {}
         print(f"    tools_used: {meta.get('tools_used', [])}")
         results.append(("Task 3 (hard)", sr.reward, sr.done))
 
         # ═══════════════════════════════════════════════
-        # TASK 4 — Trap: Unsolvable (correct: escalate)
+        # TASK 4 — Trap: Policy Conflict (correct: escalate to billing)
         # ═══════════════════════════════════════════════
         print(f"\n{'═' * 50}")
-        print("TASK 4: Trap — Unsolvable Request")
+        print("TASK 4: Trap — Cross-Policy Conflict")
         print("═" * 50)
 
         r = env.reset()
         meta = getattr(r.observation, "metadata", {}) or {}
         print(f"  Difficulty: {meta.get('difficulty', '?')}")
 
-        sr = env.step(CallToolAction(tool_name="read_ticket", arguments={}))
+        sr = env.step(CallToolAction(tool_name="read_ticket", arguments={"thought": "Read the new ticket."}))
         print(f"  read_ticket → reward={sr.reward}, done={sr.done}")
 
         sr = env.step(CallToolAction(
-            tool_name="search_knowledge_base",
-            arguments={"query": "data export"},
+            tool_name="check_billing", arguments={"thought": "Check transaction dates.", "user_id": "USR001"}
         ))
-        print(f"  search_kb → reward={sr.reward}, done={sr.done}")
+        print(f"  check_billing → reward={sr.reward}, done={sr.done}")
+
+        # Trap logic: Must search both "refund" and "account" to avoid the -0.2 penalty
+        sr = env.step(CallToolAction(
+            tool_name="search_knowledge_base",
+            arguments={"thought": "Check refund rule.", "query": "refund policy"},
+        ))
+        print(f"  search_kb(refund) → reward={sr.reward}, done={sr.done}")
 
         sr = env.step(CallToolAction(
-            tool_name="escalate_ticket", arguments={"department": "engineering"}
+            tool_name="search_knowledge_base",
+            arguments={"thought": "Check account rule.", "query": "account deletion conflict"},
         ))
-        print(f"  escalate(engineering) → reward={sr.reward:.2f}, done={sr.done}")
+        print(f"  search_kb(account) → reward={sr.reward}, done={sr.done}")
+
+        sr = env.step(CallToolAction(
+            tool_name="escalate_ticket", arguments={"thought": "Conflict detected, escalating to billing.", "department": "billing"}
+        ))
+        print(f"  escalate(billing) → reward={sr.reward:.2f}, done={sr.done}")
         meta = getattr(sr.observation, "metadata", {}) or {}
         print(f"    tools_used: {meta.get('tools_used', [])}")
         results.append(("Task 4 (trap)", sr.reward, sr.done))
@@ -178,7 +199,8 @@ def run_all_tests():
     print("═" * 50)
     all_pass = True
     for name, reward, done in results:
-        if not done or reward < 0.3:
+        # Require a strict > 0.8 reward for a "pass" to validate perfect trajectories
+        if not done or reward < 0.8:
             status = "❌"
             all_pass = False
         else:
@@ -189,9 +211,9 @@ def run_all_tests():
     print(f"\n  Average reward: {avg:.2f}")
 
     if all_pass:
-        print("\n  🎉 All tasks completed successfully!")
+        print("\n  🎉 All tasks completed successfully with perfect trajectories!")
     else:
-        print("\n  ⚠ Some tasks had issues.")
+        print("\n  ⚠ Some tasks had issues or sub-optimal trajectories.")
         sys.exit(1)
 
 

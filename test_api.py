@@ -27,7 +27,14 @@ for t in tools:
 
 # Test 3: read_ticket
 log("\n=== TEST 3: read_ticket ===")
-r = httpx.post(f"{BASE}/step", json={"action": {"type": "call_tool", "tool_name": "read_ticket", "arguments": {}}, "timeout_s": 30}, timeout=10)
+r = httpx.post(f"{BASE}/step", json={
+    "action": {
+        "type": "call_tool", 
+        "tool_name": "read_ticket", 
+        "arguments": {"thought": "I need to read the ticket first."}
+    }, 
+    "timeout_s": 30
+}, timeout=10)
 d = r.json()
 log(f"  Reward: {d.get('reward')}, Done: {d.get('done')}")
 obs = d.get("observation", {})
@@ -45,13 +52,33 @@ else:
 
 # Test 4: search_knowledge_base
 log("\n=== TEST 4: search_knowledge_base ===")
-r = httpx.post(f"{BASE}/step", json={"action": {"type": "call_tool", "tool_name": "search_knowledge_base", "arguments": {"query": "password reset"}}, "timeout_s": 30}, timeout=10)
+r = httpx.post(f"{BASE}/step", json={
+    "action": {
+        "type": "call_tool", 
+        "tool_name": "search_knowledge_base", 
+        "arguments": {
+            "thought": "I should look up the password reset policy.",
+            "query": "password reset"
+        }
+    }, 
+    "timeout_s": 30
+}, timeout=10)
 d = r.json()
 log(f"  Reward: {d.get('reward')}, Done: {d.get('done')}")
 
 # Test 5: resolve_ticket
 log("\n=== TEST 5: resolve_ticket ===")
-r = httpx.post(f"{BASE}/step", json={"action": {"type": "call_tool", "tool_name": "resolve_ticket", "arguments": {"message": "I have sent a password reset link to your email. Please check spam."}}, "timeout_s": 30}, timeout=10)
+r = httpx.post(f"{BASE}/step", json={
+    "action": {
+        "type": "call_tool", 
+        "tool_name": "resolve_ticket", 
+        "arguments": {
+            "thought": "I will send the reset link and advise them to check spam.",
+            "message": "I have sent a password reset link to your email. Please check spam."
+        }
+    }, 
+    "timeout_s": 30
+}, timeout=10)
 d = r.json()
 log(f"  Done: {d.get('done')}")
 log(f"  Final Reward: {d.get('reward')}")
