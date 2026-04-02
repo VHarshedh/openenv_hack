@@ -1,17 +1,3 @@
----
-title: Support Triage Environment
-colorFrom: blue
-colorTo: indigo
-sdk: docker
-pinned: false
-app_port: 8000
-base_path: /web
-tags:
-  - openenv
-  - reinforcement-learning
-  - agents
----
-
 # Customer Support Triage Agent (OpenEnv)
 
 A highly robust, anti-cheat simulated OpenEnv environment designed to test and train Large Language Models on complex, multi-step customer support triage tasks.
