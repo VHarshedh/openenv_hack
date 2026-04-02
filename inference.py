@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
+import asyncio
 import os
 import json
 import httpx
 import sys
 import time
 from pathlib import Path
+from datetime import datetime
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 # Only the real `.env` next to this file (not cwd, not `.env.example`).
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
@@ -41,8 +43,8 @@ MODEL_NAME = _strip(os.getenv("MODEL_NAME"))
 # Configuration (defaults below are optional tuning only)
 # ---------------------------------------------------------------------------
 
-NUM_TASKS = 4
-MAX_STEPS_PER_TASK = 10
+NUM_TASKS = 6
+MAX_STEPS_PER_TASK = 15
 
 # Wall-clock budget for the whole run (default 20 minutes for hackathon validators)
 INFERENCE_MAX_SECONDS = int(os.getenv("INFERENCE_MAX_SECONDS", "1200"))
@@ -63,6 +65,7 @@ TOOLS:
 - `read_ticket(thought)`: Read the ticket. (ALWAYS START HERE)
 - `search_knowledge_base(thought, query)`: Search policies.
 - `check_billing(thought, user_id)`: Check user billing and transactions.
+- `ping_human_manager(thought, reason)`: Ask a manager for help if the instructions are unclear.
 - `escalate_ticket(thought, department)`: Escalate to billing, engineering, or security.
 - `resolve_ticket(thought, message)`: Send the final message to the customer.
 
@@ -75,7 +78,7 @@ Every tool requires a `thought` parameter. You MUST use this parameter to think 
 """
 
 
-def main():
+async def main():
     run_start = time.time()
     step_delay = _step_delay_seconds()
 
@@ -91,164 +94,223 @@ def main():
             return True
         return False
 
-    # Wait for the environment server to wake up
     print("⏳ Waiting for environment server to start...")
     _server_ok = False
-    for _ in range(10):
-        try:
-            httpx.get(f"{ENV_URL}/docs", timeout=2.0)
-            _server_ok = True
-            break
-        except httpx.RequestError:
-            time.sleep(2)
-    if not _server_ok:
-        print("❌ ERROR: Environment server is not reachable after 10 retries!")
-        sys.exit(1)
-    print("✅ Environment server is reachable!")
-    print(f"🚀 Starting inference with {MODEL_NAME}...")
-    print(
-        f"⏳ Step delay: {step_delay}s between steps (set STEP_DELAY_SECONDS to override). "
-        f"Wall budget: {INFERENCE_MAX_SECONDS}s (INFERENCE_MAX_SECONDS).\n"
-    )
+    
+    # Use httpx.AsyncClient for non-blocking HTTP requests
+    async with httpx.AsyncClient(timeout=30.0) as http_client:
+        for _ in range(10):
+            try:
+                await http_client.get(f"{ENV_URL}/docs", timeout=2.0)
+                _server_ok = True
+                break
+            except httpx.RequestError:
+                await asyncio.sleep(2)
+                
+        if not _server_ok:
+            print("❌ ERROR: Environment server is not reachable after 10 retries!")
+            sys.exit(1)
+            
+        print("✅ Environment server is reachable!")
+        print(f"🚀 Starting inference with {MODEL_NAME}...")
+        print(
+            f"⏳ Step delay: {step_delay}s between steps (set STEP_DELAY_SECONDS to override). "
+            f"Wall budget: {INFERENCE_MAX_SECONDS}s (INFERENCE_MAX_SECONDS).\n"
+        )
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+        # Use AsyncOpenAI instead of OpenAI
+        client = AsyncOpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
-    openai_tools = [
-        {"type": "function", "function": {"name": "read_ticket", "description": "Read ticket.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}}, "required": ["thought"]}}},
-        {"type": "function", "function": {"name": "search_knowledge_base", "description": "Search policies.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}, "query": {"type": "string"}}, "required": ["thought", "query"]}}},
-        {"type": "function", "function": {"name": "check_billing", "description": "Check billing.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}, "user_id": {"type": "string"}}, "required": ["thought", "user_id"]}}},
-        {"type": "function", "function": {"name": "escalate_ticket", "description": "Escalate ticket.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}, "department": {"type": "string"}}, "required": ["thought", "department"]}}},
-        {"type": "function", "function": {"name": "resolve_ticket", "description": "Resolve ticket.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}, "message": {"type": "string"}}, "required": ["thought", "message"]}}},
-    ]
-
-    total_rewards = []
-
-    for task_num in range(1, NUM_TASKS + 1):
-        if time_budget_exceeded():
-            break
-
-        print(f"\n{'='*60}\n  TASK {task_num}\n{'='*60}")
-
-        httpx.post(f"{ENV_URL}/reset", timeout=10.0).raise_for_status()
-
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": "New ticket arrived. Begin."},
+        openai_tools = [
+            {"type": "function", "function": {"name": "read_ticket", "description": "Read ticket.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}}, "required": ["thought"]}}},
+            {"type": "function", "function": {"name": "search_knowledge_base", "description": "Search policies.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}, "query": {"type": "string"}}, "required": ["thought", "query"]}}},
+            {"type": "function", "function": {"name": "check_billing", "description": "Check billing.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}, "user_id": {"type": "string"}}, "required": ["thought", "user_id"]}}},
+            {"type": "function", "function": {"name": "ping_human_manager", "description": "Ask a manager for help.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}, "reason": {"type": "string"}}, "required": ["thought", "reason"]}}},
+            {"type": "function", "function": {"name": "escalate_ticket", "description": "Escalate ticket.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}, "department": {"type": "string"}}, "required": ["thought", "department"]}}},
+            {"type": "function", "function": {"name": "resolve_ticket", "description": "Resolve ticket.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}, "message": {"type": "string"}}, "required": ["thought", "message"]}}},
         ]
 
-        done = False
-        step_count = 0
-        final_reward = 0.0
+        total_rewards = []
+        run_logs = {
+            "model": MODEL_NAME,
+            "timestamp": datetime.now().isoformat(),
+            "tasks": []
+        }
 
-        while not done and step_count < MAX_STEPS_PER_TASK:
+        for task_idx in range(NUM_TASKS):
             if time_budget_exceeded():
                 break
 
-            step_count += 1
+            print(f"\n{'='*60}\n   TASK {task_idx + 1}\n{'='*60}")
 
-            if step_count > 1:
-                print(f"  ⏳ Waiting {step_delay}s before next step...")
-                time.sleep(step_delay)
+            # Sync the environment to the specific task index using await
+            response = await http_client.post(f"{ENV_URL}/reset", json={"task_idx": task_idx}, timeout=10.0)
+            response.raise_for_status()
+            
+            reset_data = response.json()
+            episode_id = reset_data.get("state", {}).get("episode_id") or reset_data.get("episode_id")
 
-            print(f"  --- Step {step_count} ---")
+            task_log = {
+                "task_idx": task_idx,
+                "difficulty": reset_data.get("observation", {}).get("metadata", {}).get("difficulty"),
+                "steps": [],
+                "final_reward": 0.0
+            }
 
-            api_success = False
-            for attempt in range(3):
-                try:
-                    response = client.chat.completions.create(
-                        model=MODEL_NAME,
-                        messages=messages,
-                        tools=openai_tools,
-                        tool_choice="required" if "gemini" not in MODEL_NAME.lower() else "auto",
-                        temperature=0.0,
-                    )
-                    api_success = True
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": "New ticket arrived. Begin."},
+            ]
+
+            done = False
+            step_count = 0
+            final_reward = 0.0
+
+            while not done and step_count < MAX_STEPS_PER_TASK:
+                if time_budget_exceeded():
                     break
-                except Exception as e:
-                    print(f"  ⚠ API error on attempt {attempt + 1}: {e}")
-                    if "429" in str(e) or "quota" in str(e).lower() or "503" in str(e):
-                        print("  🚨 Rate limit/Server busy. Cooling down for 30s...")
-                        time.sleep(30)
-                    else:
+
+                step_count += 1
+
+                if step_count > 1:
+                    print(f"   ⏳ Waiting {step_delay}s before next step...")
+                    await asyncio.sleep(step_delay) # Non-blocking sleep
+
+                print(f"   --- Step {step_count} ---")
+
+                api_success = False
+                for attempt in range(3):
+                    try:
+                        # Non-blocking API call
+                        response = await client.chat.completions.create(
+                            model=MODEL_NAME,
+                            messages=messages,
+                            tools=openai_tools,
+                            tool_choice="required" if "gemini" not in MODEL_NAME.lower() else "auto",
+                            temperature=0.0,
+                        )
+                        api_success = True
                         break
+                    except Exception as e:
+                        print(f"   ⚠ API error on attempt {attempt + 1}: {e}")
+                        if "429" in str(e) or "quota" in str(e).lower() or "503" in str(e):
+                            print("   🚨 Rate limit/Server busy. Cooling down for 30s...")
+                            await asyncio.sleep(30)
+                        else:
+                            break
 
-            if not api_success:
-                print("  ❌ API failed after retries. Aborting task.")
-                break
-
-            response_message = response.choices[0].message
-
-            if response_message.tool_calls and len(response_message.tool_calls) > 1:
-                first_tc = response_message.tool_calls[0]
-                messages.append({
-                    "role": "assistant",
-                    "content": response_message.content or None,
-                    "tool_calls": [{
-                        "id": first_tc.id,
-                        "type": "function",
-                        "function": {"name": first_tc.function.name, "arguments": first_tc.function.arguments},
-                    }],
-                })
-            else:
-                messages.append(response_message)
-
-            if response_message.tool_calls:
-                tool_call = response_message.tool_calls[0]
-                name = tool_call.function.name
-
-                try:
-                    raw_args = tool_call.function.arguments or "{}"
-                    args = json.loads(raw_args)
-                    if args is None:
-                        args = {}
-                except json.JSONDecodeError:
-                    print(f"  ⚠ Model provided invalid JSON: {tool_call.function.arguments}")
-                    args = {}
-
-                print(f"  🔧 Tool: {name}({json.dumps(args)})")
-
-                step_resp = httpx.post(
-                    f"{ENV_URL}/step",
-                    json={"action": {"tool_name": name, "arguments": args}},
-                    timeout=30.0,
-                )
-                step_resp.raise_for_status()
-                res = step_resp.json()
-
-                res_data = res.get("observation")
-                if res_data is None:
-                    tool_out = "Error: Environment returned no data. Your tool arguments might be incorrect."
-                else:
-                    result_obj = res_data.get("result", "Success")
-                    if isinstance(result_obj, dict):
-                        tool_out = str(result_obj.get("data", result_obj))
-                    else:
-                        tool_out = str(result_obj)
-
-                done = res.get("done", False)
-                reward = res.get("reward", 0.0)
-                print(f"  📋 Result: {tool_out[:100]}...")
-                print(f"  💰 Reward: {round(reward, 2)}")
-
-                messages.append({"role": "tool", "tool_call_id": tool_call.id, "name": name, "content": tool_out})
-
-                if done:
-                    final_reward = reward
-                    print(f"  ✅ Complete! Final Reward: {round(final_reward, 2)}")
+                if not api_success:
+                    print("   ❌ API failed after retries. Aborting task.")
                     break
-            else:
-                safe_content = str(response_message.content or "No text provided.")
-                print(f"  🤖 Agent chatted: {safe_content[:50]}...")
-                messages.append({"role": "user", "content": "Focus. Use a tool to progress."})
 
-        total_rewards.append(final_reward)
+                response_message = response.choices[0].message
 
-    if not total_rewards:
-        print("\n❌ No tasks completed.")
-        sys.exit(1)
+                if response_message.tool_calls and len(response_message.tool_calls) > 1:
+                    first_tc = response_message.tool_calls[0]
+                    messages.append({
+                        "role": "assistant",
+                        "content": response_message.content or None,
+                        "tool_calls": [{
+                            "id": first_tc.id,
+                            "type": "function",
+                            "function": {"name": first_tc.function.name, "arguments": first_tc.function.arguments},
+                        }],
+                    })
+                else:
+                    messages.append(response_message)
 
-    print(f"\n{'='*60}\n  SUMMARY: Average Reward: {round(sum(total_rewards)/len(total_rewards), 2)}\n{'='*60}")
+                if response_message.tool_calls:
+                    tool_call = response_message.tool_calls[0]
+                    name = tool_call.function.name
+
+                    invalid_json = False
+                    try:
+                        raw_args = tool_call.function.arguments or "{}"
+                        args = json.loads(raw_args)
+                        if args is None:
+                            args = {}
+                    except json.JSONDecodeError:
+                        print(f"   ⚠ Model provided invalid JSON: {tool_call.function.arguments}")
+                        invalid_json = True
+                        args = {}
+
+                    if invalid_json:
+                        tool_out = "Error: Invalid JSON format. Please fix your syntax and try again."
+                        print(f"   📋 Result: {tool_out}")
+                        messages.append({"role": "tool", "tool_call_id": tool_call.id, "name": name, "content": tool_out})
+                        task_log["steps"].append({"action": "invalid_json", "error": tool_out})
+                        continue
+
+                    print(f"   🔧 Tool: {name}({json.dumps(args)})")
+
+                    step_payload = {"action": {"tool_name": name, "arguments": args}}
+                    if episode_id:
+                        step_payload["episode_id"] = episode_id
+
+                    # Non-blocking environment step
+                    step_resp = await http_client.post(
+                        f"{ENV_URL}/step",
+                        json=step_payload,
+                    )
+                    step_resp.raise_for_status()
+                    res = step_resp.json()
+
+                    res_data = res.get("observation")
+                    if res_data is None:
+                        tool_out = "Error: Environment returned no data."
+                    else:
+                        result_obj = res_data.get("result", "Success")
+                        if isinstance(result_obj, dict):
+                            tool_out = str(result_obj.get("data", result_obj))
+                        else:
+                            tool_out = str(result_obj)
+
+                    done = res.get("done", False)
+                    reward = res.get("reward", 0.0)
+                    print(f"   📋 Result: {tool_out[:100]}...")
+                    print(f"   💰 Reward: {round(reward, 2)}")
+
+                    messages.append({"role": "tool", "tool_call_id": tool_call.id, "name": name, "content": tool_out})
+                    
+                    task_log["steps"].append({
+                        "tool_name": name,
+                        "arguments": args,
+                        "result": tool_out,
+                        "reward": reward,
+                        "done": done
+                    })
+
+                    if done:
+                        final_reward = reward
+                        print(f"   ✅ Complete! Final Reward: {round(final_reward, 2)}")
+                        break
+                else:
+                    safe_content = str(response_message.content or "No text provided.")
+                    print(f"   🤖 Agent chatted: {safe_content[:50]}...")
+                    messages.append({"role": "user", "content": "Focus. Use a tool to progress."})
+                    task_log["steps"].append({"action": "chat", "content": safe_content})
+
+            task_log["final_reward"] = final_reward
+            run_logs["tasks"].append(task_log)
+            total_rewards.append(final_reward)
+
+        if not total_rewards:
+            print("\n❌ No tasks completed.")
+            sys.exit(1)
+
+        print(f"\n{'='*60}\n   SUMMARY: Average Reward: {round(sum(total_rewards)/len(total_rewards), 2)}\n{'='*60}")
+        
+        # Save detailed logs
+        os.makedirs("results", exist_ok=True)
+        safe_model_name = MODEL_NAME.replace("/", "_").replace(":", "_")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = f"results/{safe_model_name}_run_{timestamp}.json"
+        
+        with open(log_file, "w") as f:
+            json.dump(run_logs, f, indent=2)
+        print(f"📁 Detailed run logs saved to {log_file}")
 
 
 if __name__ == "__main__":
-    main()
+    # Bootstraps the async event loop
+    asyncio.run(main())

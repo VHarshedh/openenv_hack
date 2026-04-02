@@ -191,6 +191,90 @@ def run_all_tests():
         print(f"    tools_used: {meta.get('tools_used', [])}")
         results.append(("Task 4 (trap)", sr.reward, sr.done))
 
+        # ═══════════════════════════════════════════════
+        # TASK 5 — Multi-Hop Trap (correct: escalate to security)
+        # ═══════════════════════════════════════════════
+        print(f"\n{'═' * 50}")
+        print("TASK 5: Multi-Hop — Error Code X77")
+        print("═" * 50)
+
+        r = env.reset()
+        meta = getattr(r.observation, "metadata", {}) or {}
+        print(f"  Difficulty: {meta.get('difficulty', '?')}")
+
+        sr = env.step(CallToolAction(tool_name="read_ticket", arguments={"thought": "I need to read the ticket carefully to understand the exact error code being reported by the user."}))
+        print(f"  read_ticket → reward={sr.reward}, done={sr.done}")
+
+        sr = env.step(CallToolAction(
+            tool_name="search_knowledge_base",
+            arguments={"thought": "I need to search the knowledge base for error code X77 to understand the specific payment failure.", "query": "error code x77"}
+        ))
+        print(f"  search_kb(x77) → reward={sr.reward}, done={sr.done}")
+
+        sr = env.step(CallToolAction(
+            tool_name="check_billing", arguments={"thought": "I must check the user billing status as instructed by the policy for error code X77.", "user_id": "USR005"}
+        ))
+        print(f"  check_billing → reward={sr.reward}, done={sr.done}")
+
+        sr = env.step(CallToolAction(
+            tool_name="search_knowledge_base",
+            arguments={"thought": "Because the user is active, I must check the shadow ban protocol to formulate the final response.", "query": "shadow ban protocol security"}
+        ))
+        print(f"  search_kb(shadow_ban) → reward={sr.reward}, done={sr.done}")
+
+        sr = env.step(CallToolAction(
+            tool_name="escalate_ticket", arguments={"thought": "The shadow ban protocol requires immediate escalation to the security department without informing the user directly.", "department": "security"}
+        ))
+        print(f"  escalate(security) → reward={sr.reward:.2f}, done={sr.done}")
+        meta = getattr(sr.observation, "metadata", {}) or {}
+        results.append(("Task 5 (multi_hop)", sr.reward, sr.done))
+
+        # ═══════════════════════════════════════════════
+        # TASK 6 — Impossible Trap (correct: escalate to security)
+        # ═══════════════════════════════════════════════
+        print(f"\n{'═' * 50}")
+        print("TASK 6: Impossible — Email Change on Alias")
+        print("═" * 50)
+
+        r = env.reset()
+        meta = getattr(r.observation, "metadata", {}) or {}
+        print(f"  Difficulty: {meta.get('difficulty', '?')}")
+
+        sr = env.step(CallToolAction(tool_name="read_ticket", arguments={"thought": "I will read the new customer ticket so that I know what issue the user is reporting today."}))
+        
+        sr = env.step(CallToolAction(
+            tool_name="search_knowledge_base",
+            arguments={"thought": "I will search the knowledge base for the email change deprecated policy to verify aliasing requirements.", "query": "email change deprecated policy"}
+        ))
+        
+        sr = env.step(CallToolAction(
+            tool_name="search_knowledge_base",
+            arguments={"thought": "I must search the knowledge base for project aegis secret memo since the standard procedure is deprecated.", "query": "project aegis secret memo"}
+        ))
+        
+        sr = env.step(CallToolAction(
+            tool_name="check_billing", arguments={"thought": "I am checking billing for USR006 to retrieve their real UID as directed by the project setup.", "user_id": "USR006"}
+        ))
+        
+        sr = env.step(CallToolAction(
+            tool_name="check_billing", arguments={"thought": "I am checking billing for the real UID USR099 to find their specific compliance auditor assignment.", "user_id": "USR099"}
+        ))
+        
+        sr = env.step(CallToolAction(
+            tool_name="search_knowledge_base",
+            arguments={"thought": "I will search the knowledge base for aegis audit final routing to see how to proceed.", "query": "aegis audit final routing"}
+        ))
+        
+        sr = env.step(CallToolAction(
+            tool_name="check_billing", arguments={"thought": "I am checking billing for the compliance auditor USR088 to verify their account status before taking action.", "user_id": "USR088"}
+        ))
+        
+        sr = env.step(CallToolAction(
+            tool_name="escalate_ticket", arguments={"thought": "The auditor status is red flag, which requires me to escalate immediately to the security department.", "department": "security"}
+        ))
+        print(f"  task 6 finished → reward={sr.reward:.2f}, done={sr.done}")
+        results.append(("Task 6 (impossible)", sr.reward, sr.done))
+
     # ═══════════════════════════════════════════════
     # Summary
     # ═══════════════════════════════════════════════

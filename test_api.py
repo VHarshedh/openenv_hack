@@ -31,7 +31,7 @@ r = httpx.post(f"{BASE}/step", json={
     "action": {
         "type": "call_tool", 
         "tool_name": "read_ticket", 
-        "arguments": {"thought": "I need to read the ticket first."}
+        "arguments": {"thought": "I need to read the ticket first so that I can understand the user's issue completely."}
     }, 
     "timeout_s": 30
 }, timeout=10)
@@ -57,7 +57,7 @@ r = httpx.post(f"{BASE}/step", json={
         "type": "call_tool", 
         "tool_name": "search_knowledge_base", 
         "arguments": {
-            "thought": "I should look up the password reset policy.",
+            "thought": "I should look up the password reset policy in the knowledge base to see how to proceed.",
             "query": "password reset"
         }
     }, 
@@ -66,14 +66,30 @@ r = httpx.post(f"{BASE}/step", json={
 d = r.json()
 log(f"  Reward: {d.get('reward')}, Done: {d.get('done')}")
 
-# Test 5: resolve_ticket
-log("\n=== TEST 5: resolve_ticket ===")
+# Test 5: ping_human_manager
+log("\n=== TEST 5: ping_human_manager ===")
+r = httpx.post(f"{BASE}/step", json={
+    "action": {
+        "type": "call_tool", 
+        "tool_name": "ping_human_manager", 
+        "arguments": {
+            "thought": "I will ask a human manager for advice on how to proceed with the password reset because the documentation is slightly unclear to me.",
+            "reason": "Need clarification on password reset procedures."
+        }
+    }, 
+    "timeout_s": 30
+}, timeout=10)
+d = r.json()
+log(f"  Reward: {d.get('reward')}, Done: {d.get('done')}")
+
+# Test 6: resolve_ticket
+log("\n=== TEST 6: resolve_ticket ===")
 r = httpx.post(f"{BASE}/step", json={
     "action": {
         "type": "call_tool", 
         "tool_name": "resolve_ticket", 
         "arguments": {
-            "thought": "I will send the reset link and advise them to check spam.",
+            "thought": "I will send the reset link and advise them to check their spam folder just in case.",
             "message": "I have sent a password reset link to your email. Please check spam."
         }
     }, 

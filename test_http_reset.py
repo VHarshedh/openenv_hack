@@ -6,7 +6,7 @@ BASE = "http://localhost:8000"
 
 print("Testing HTTP /reset iteration using read_ticket...")
 
-for i in range(1, 6):
+for i in range(1, 8):
     try:
         # Reset to advance task
         httpx.post(f"{BASE}/reset", timeout=5).raise_for_status()
@@ -18,7 +18,7 @@ for i in range(1, 6):
                 "type": "call_tool", 
                 "tool_name": "read_ticket", 
                 "arguments": {
-                    "thought": "Reading ticket to verify task cycle."
+                    "thought": "Reading ticket to verify that the HTTP reset has properly cycled the environment task."
                 }
             }
         }
