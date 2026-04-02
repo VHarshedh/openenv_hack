@@ -67,6 +67,7 @@ class SupportEnvironment(MCPEnvironment):
             "searched_kb": False, 
             "checked_db": False, 
             "distracted": False,
+            "pinged_manager": False,
             "out_of_order": False,
             "god_query": False,
             "teleported": False,
@@ -187,7 +188,7 @@ class SupportEnvironment(MCPEnvironment):
             env = _active_env.get()
             env._validate_thought(thought)
             env._record_tool_use("ping_human_manager")
-            env._progress["distracted"] = True
+            env._progress["pinged_manager"] = True
             return "SYSTEM AUTO-REPLY: All managers are currently offline. Please follow standard SOP."
 
         @mcp.tool
@@ -208,8 +209,44 @@ class SupportEnvironment(MCPEnvironment):
             if len(message.strip().split()) < 5:
                 env._progress["lazy_resolution"] = True
                 
-                if any(w in thought_lower for w in ["policy", "knowledge base", "kb", "escalation", "verify", "rule", "protocol"]):
-                    self._progress["thought_verified_kb"] = True
+            msg_lower = message.lower()
+            diff = env._current_task.get("difficulty")
+            if diff == "easy" and not any(w in msg_lower for w in ["password", "reset", "link", "email"]):
+                env._progress["lazy_resolution"] = True
+            if diff == "medium" and not any(w in msg_lower for w in ["refund", "process", "duplicate", "charge"]):
+                env._progress["lazy_resolution"] = True
+                
+            env._finalize_episode("resolve")
+            return "Resolved."
+
+        # Pass mcp as a positional argument
+        super().__init__(mcp)
+        
+        # Hard fail-safe to guarantee the missing property from the Traceback always exists
+        if not hasattr(self, "_mode_tools"):
+            self._mode_tools = []
+
+    def _validate_thought(self, thought: str):
+        """Scans the thought parameter contextually to prove step-by-step reasoning."""
+        if not thought or len(thought.strip()) < 10: 
+            self._progress["distracted"] = True
+            return
+            
+        thought_lower = thought.lower()
+        
+        # Step 1: Identify all distinct requests (Can happen anytime)
+        if any(w in thought_lower for w in ["request", "distinct", "issue", "problem", "ticket", "user wants"]):
+            self._progress["thought_identified_request"] = True
+            
+        # Step 2: Note specific states (Context-Aware: Only valid if they have actually queried the DB)
+        if self._progress.get("checked_db", False):
+            if any(w in thought_lower for w in ["status", "active", "suspended", "state", "red-flag"]):
+                self._progress["thought_noted_state"] = True
+                
+        # Step 3/4: Cross-reference & Verify against KB (Context-Aware: Only valid if they searched KB)
+        if self._progress.get("searched_kb", False):
+            if any(w in thought_lower for w in ["policy", "knowledge base", "kb", "escalation", "verify", "rule", "protocol"]):
+                self._progress["thought_verified_kb"] = True
 
     def _generate_random_noise_policies(self, count: int) -> list[dict]:
         """Procedurally generates completely random noise policies."""
@@ -340,6 +377,7 @@ class SupportEnvironment(MCPEnvironment):
         r = thought_r + task_r
 
         # Global Penalties
+        if self._progress["pinged_manager"]: r -= 0.3  # Strict penalty for giving up and pinging manager
         if self._progress["distracted"]: r -= 0.2
         if self._progress["out_of_order"]: r -= 0.1
         if self._progress["god_query"]: r -= 0.2
@@ -439,7 +477,7 @@ class SupportEnvironment(MCPEnvironment):
         
         self._progress = {
             "read": False, "searched_kb": False, "checked_db": False, 
-            "distracted": False, "out_of_order": False, 
+            "distracted": False, "pinged_manager": False, "out_of_order": False, 
             "god_query": False, "teleported": False, "lazy_resolution": False, 
             "milestones": set(), "queried_users": set(),
             # Tracking Instruction Following
@@ -457,7 +495,8 @@ class SupportEnvironment(MCPEnvironment):
 
     def step(self, action: Action, **kwargs) -> Observation:
         active_instance = self
-        if not self._current_task and getattr(self.__class__, "_latest_instance", None):
+        # Safely check if self has an empty task (FastAPI dummy instance check)
+        if not getattr(self, "_current_task", None) and getattr(self.__class__, "_latest_instance", None):
             active_instance = self.__class__._latest_instance
             
         token = _active_env.set(active_instance)
@@ -468,6 +507,7 @@ class SupportEnvironment(MCPEnvironment):
             if isinstance(action, CallToolAction):
                 active_instance._state.step_count += 1
                 
+            # Execute on the CURRENT thread's instance so FastMCP doesn't silently fail cross-thread!
             obs = super().step(action, **kwargs)
             
             if isinstance(action, CallToolAction) and isinstance(obs, CallToolObservation):

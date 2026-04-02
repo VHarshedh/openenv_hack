@@ -4,4 +4,8 @@ __pycache__/
 .venv/
 .DS_Store
 outputs/
+Logs
+*.log
+Inference Results
+results/
 Error.txt

@@ -12,95 +12,103 @@ tags:
   - agents
 ---
 
-# Customer Support Triage Environment
+# Customer Support Triage Agent (OpenEnv)
 
-A real-world Reinforcement Learning (RL) environment built on the OpenEnv spec. This environment simulates a Level 1 Customer Support Agent workflow, requiring an AI model to use tools to triage, diagnose, and resolve customer tickets while utilizing strict Chain of Thought (CoT) reasoning.
+A highly robust, anti-cheat simulated OpenEnv environment designed to test and train Large Language Models on complex, multi-step customer support triage tasks.
 
-## Benchmark Validation
+## Motivation & Real-World Utility
 
-This environment has been cross-validated using proprietary, open-source, and frontier models. It successfully filters for both logical reasoning and strict tool adherence across different reasoning tiers. 
+Customer support routing is a critical real-world task where LLMs are frequently deployed. This environment tests an agent's ability to:
 
-*Note: To ensure a baseline of agentic behavior, `tool_choice` is dynamically set to `"required"` for all non-Gemini models.*
+1. **Navigate structured knowledge:** Agents must dynamically query an internal Knowledge Base (KB) and a mock CRM Database.
+2. **Filter Noise:** The environment procedurally generates irrelevant corporate policies (e.g., dress codes, lunch reimbursements) that agents must learn to ignore.
+3. **Follow Strict Operating Procedures:** It assesses if agents blindly resolve tickets or if they securely verify account states (e.g., Suspended, Flagged) before executing escalations.
+4. **RLHF & Agent Training Efficiency:** Unlike standard benchmarks with sparse, binary pass/fail grading, this environment provides a highly dense and granular reward signal (0.0 to 1.0 with intermediate penalties). This makes it an exceptionally efficient engine for generating high-quality preference pairs and trajectory data for Reinforcement Learning from Human Feedback (RLHF) and Direct Preference Optimization (DPO).
 
-| Model | Tool Choice | Avg Reward | Tier | Performance Notes |
-| :--- | :---: | :---: | :---: | :--- |
-| **Gemini 3.1 Flash-Lite** | `auto` | **0.80** | SOTA Proprietary | 100% logic and SOP adherence. Flawless Chain of Thought. |
-| **Qwen 2.5 7B Instruct** | `required` | **0.55** | SOTA Open-Source | Failed complex routing; escalated instead of resolving duplicate charges. |
-| **Llama 3.3 70B** | `required` | **0.45** | Frontier Open | **RLHF Efficiency Bias:** Skipped mandatory policy checks entirely. |
-| **Llama 3.1 8B** | `required` | **0.44** | Mid-Tier Baseline | Hallucinated KB queries, trapped in loops, failed basic task resolution. |
+## Key Features (Anti-Cheat & Grading)
 
----
+To ensure this environment rigorously challenges frontier models, it implements the following advanced features:
 
-## Comparative Analysis
+* **Procedural Task Generation:** Task targets and ticket text are procedurally randomized on every `reset()`. Agents cannot memorize that "USR004 is the 500 error." They must actively use their tools to extract the target user from the natural language ticket.
+* **Context-Aware Thought Grading (60/40 Split):** The environment's reward function explicitly grades the agent's Chain-of-Thought (CoT). Agents receive 60% of their reward for executing the correct final tool call, but the remaining 40% is only awarded if the agent's `thought` parameter demonstrably proves it verified the KB and checked the user's DB state.
+* **Anti-Teleportation & Milestone Verification:** The environment tracks a state machine of the agent's knowledge. If an agent tries to guess a dynamically generated inner-UID without explicitly querying the database first, it triggers an anti-cheat penalty.
 
-### 1. The 0.80 Ceiling (Gemini 3.1 Flash-Lite)
-Gemini was the only model to successfully navigate the entire gauntlet. Its success was driven by its ability to utilize the `thought` parameter effectively. For example, in Task 3 (The Suspension Trap), Gemini's internal thought explicitly connected the 500 error to the `suspended` status found in billing, leading it to search the exact correct policy and escalate to `SECURITY`. 
+## Task Descriptions & Difficulty
 
-### 2. Multi-Hop Fragility (Qwen 2.5 7B)
-While Qwen is a highly capable model, it suffered a significant drop in score (0.55) due to multi-hop fragility:
-* **Task 2 (Duplicate Charge):** The model correctly found the duplicate charge but defaulted to its base instinct of escalating billing issues (`escalate_ticket`) instead of following the Knowledge Base policy to issue an immediate refund (`resolve_ticket`).
-* **Task 3 (Suspension):** It successfully identified that the user was suspended, but fell back on the heuristic that "500 errors go to Engineering" instead of routing to the mandated Security department.
+The environment contains 6 distinct tasks of escalating difficulty.
 
-### 3. RLHF Efficiency Bias & The "Lazy Agent" (Llama 3.3 70B)
-Testing the frontier-class Llama 3.3 70B revealed a fascinating "Overconfidence Penalty," resulting in a score of 0.45:
-* **Shortcutting SOP:** Even with tools required, the model completely skipped the mandatory `search_knowledge_base` tool across almost all tasks. It attempted to resolve or escalate tickets immediately based on its internal pre-trained knowledge of general support rules.
-* **Observation:** This proves the environment is robust enough to catch "helpful but unaligned" behavior in massive models that prioritize speed over strict protocol adherence.
+| Task | Difficulty | Objective | Expected Steps | 
+| ----- | ----- | ----- | ----- | 
+| 1 | **Easy** | Reset a password by verifying identity via the KB. | 3 | 
+| 2 | **Medium** | Process a refund after checking the database for recent duplicate transactions. | 4 | 
+| 3 | **Hard** | Deep Diagnosis: Troubleshoot an Error 500 on a Suspended account, requiring security escalation. | 4 | 
+| 4 | **Trap** | Conflict Awareness: Handle a user asking for both a refund AND deletion, requiring the agent to synthesize competing KB policies. | 5 | 
+| 5 | **Multi-Hop** | Shadow Ban Protocol: Agent must map an Error X77 to a secondary, hidden security protocol. | 5 | 
+| 6 | **Ultra** | Project Aegis: Agent must navigate a deprecated policy, discover a hidden internal memo, find a mapped "Real UID", check a secondary Auditor status, and hit a dead-end requiring human manager ping before escalating. | 8 | 
 
-### 4. Mid-Tier Looping (Llama 3.1 8B)
-Llama 3.1 8B (0.44) demonstrated the limits of smaller models in strict environments. In Task 2, it scored a flat **0.00** by failing to comprehend the duplicate charge and incorrectly escalating. In Task 4, it got trapped in a repetitive loop, repeatedly querying the Knowledge Base for "escalation path" and finding nothing, rather than synthesizing the conflicting policies.
+## Model Benchmarks & Analysis
 
----
+We ran inference across 5 different models to establish baselines. The strict 60/40 instruction-following grader successfully exposed significant flaws in modern tool-calling agents.
 
-## Real-World Utility
+| Model | Average Score | T1 (Easy) | T2 (Med) | T3 (Hard) | T4 (Trap) | T5 (Multi) | T6 (Ultra) | 
+| ----- | ----- | ----- | ----- | ----- | ----- | ----- | ----- | 
+| **Gemini 3.1 Flash-Lite** | **0.83** | 0.90 | 0.90 | 1.00 | 0.90 | 1.00 | 0.25 | 
+| **Qwen 2.5 72B Instruct** | **0.70** | 0.90 | 0.25 | 1.00 | 0.90 | 1.00 | 0.15 | 
+| **Qwen 2.5 7B Instruct** | **0.57** | 0.70 | 1.00 | 1.00 | 0.70 | 0.00 | 0.00 | 
+| **Llama 3.1 8B Instruct** | **0.42** | 0.00 | 0.50 | 0.00 | 1.00 | 0.90 | 0.10 | 
+| **Llama 3.3 70B Versatile** | **0.16** | 0.20 | 0.05 | 0.20 | 0.00 | 0.30 | 0.20 | 
 
-Customer support triage is a massive bottleneck for modern SaaS companies. This environment provides a realistic training ground for LLM agents to learn how to:
-1. **Cross-reference user claims** against internal live databases (Billing).
-2. **Search and apply strict company policies** from a central Knowledge Base.
-3. **Determine Resolution Path:** Decide when to resolve a ticket autonomously vs. when to escalate to human specialists (Billing, Engineering, Security).
+### Key Insights from the Baselines
 
----
+1. **SOP Adherence vs. Task Completion:** The data proves that while large models might eventually guess the correct final department, they struggle to strictly adhere to corporate Standard Operating Procedures (SOPs). Heavy penalties for bypassing the Knowledge Base or prematurely pinging human managers (-0.3 deduction) successfully differentiate true reasoning agents from lucky guessers.
+2. **The Overconfidence Penalty:** `Llama-3.3-70B` scored the lowest because it was overconfident. Instead of following the SOP to search the knowledge base first, it frequently guessed the escalation department immediately based on its pre-trained weights. Our strict grader severely penalized this lack of methodology.
+3. **Infinite Tool Loops:** The smaller 7B and 8B models frequently fell into infinite tool loops. For example, `Qwen 2.5 7B` failed Task 5 because it called `read_ticket` 15 times in a row. `Llama 3.3 70B` bizarrely called `check_billing` 14 consecutive times on Task 4.
+4. **The Ultra Task (Project Aegis):** No model was able to fully solve Task 6. Even the top performer (Gemini) successfully navigated the multi-hop database lookup but failed to synthesize the final rule after the manager ping returned a system auto-reply.
 
 ## Action & Observation Spaces
 
-All interactions happen through strictly typed MCP Tools (Action Space). **Crucially, every tool requires a mandatory `thought` parameter** to force step-by-step reasoning before execution:
-* `read_ticket(thought)`: Returns the customer's issue text. (ALWAYS START HERE).
-* `search_knowledge_base(thought, query)`: Returns policy text based on semantic keywords.
-* `check_billing(thought, user_id)`: Returns recent transactions and account status.
-* `escalate_ticket(thought, department)`: Ends the episode, routing to a human team (Billing, Engineering, Security).
-* `resolve_ticket(thought, message)`: Ends the episode with a direct customer response.
+This environment strictly implements the **OpenEnv MCP (Model Context Protocol)** specification.
 
-**Observation Space:** Returns JSON strings containing the tool execution results, current step count, and partial trajectory rewards. This allows the model to "see" the output of its actions in real-time.
+### Observation Space
 
----
+The observation space returns the result of the tool execution as a string, alongside the standard OpenEnv variables:
 
-## Task Difficulty & Grading Logic
+* `done` (bool): Whether the episode has terminated.
+* `reward` (float): The current trajectory reward (0.0 to 1.0).
+* `metadata` (dict): Includes the difficulty of the current task.
 
-The environment dynamically cycles through 4 tasks of increasing difficulty upon calling `/reset`.
+### Action Space (Tools)
 
-| Task | Difficulty | Objective | Correct Action |
-|------|------------|-----------|----------------|
-| **1. Password Reset** | Easy | User forgot password. No DB check needed. | `resolve_ticket` with specific keywords (link, spam, etc.) |
-| **2. Duplicate Charge** | Medium | User reports a double charge on their statement. | `resolve_ticket` directly after verifying array data. |
-| **3. Suspension Diagnosis** | Hard | User reports a 500 error; DB shows suspended status. | `escalate_ticket` to **Security**. |
-| **4. Cross-Policy Conflict**| Trap | User requests account deletion AND a refund. | `escalate_ticket` to **Billing** (Policy Conflict). |
+The agent interacts with the environment via 6 typed tools. **Every tool strictly requires a `thought` string parameter.**
 
-**Reward Function:**
-The environment provides dense, partial trajectory rewards to guide the agent:
-* **+0.1 to +0.2:** For starting by reading the ticket and using the correct initial tool sequence.
-* **+0.3 to +0.5:** For selecting the correct terminal action (Resolve vs. Escalate) and the correct department.
-* **-0.2 to -0.5 (Penalty):** For hallucinating a resolution that violates searched policies, skipping mandatory data checks, or missing cross-policy conflicts.
-
----
-
-## Robustness Testing
-To ensure the environment successfully filters for intelligence, we tested models utilizing a forced Chain of Thought (`thought` parameter). Because `tool_choice` is dynamically set to `"required"` for open-source and API models, the benchmark isolates logical routing from basic tool-calling syntax errors. As demonstrated by the scoring spread, models lacking native multi-hop reasoning or strict instruction-following will consistently fail due to heuristic biases or loop-trapping. This confirms that solving the environment requires sophisticated logical branching, and a baseline reward of >0.80 requires 100% adherence to the provided SOP.
+1. `read_ticket(thought)`: Reads the inbound customer message.
+2. `search_knowledge_base(thought, query)`: Searches the internal policy KB.
+3. `check_billing(thought, user_id)`: Checks account status and CRM notes.
+4. `ping_human_manager(thought, reason)`: Requests assistance on undocumented edge cases.
+5. `escalate_ticket(thought, department)`: Terminal action. Routes the ticket.
+6. `resolve_ticket(thought, message)`: Terminal action. Replies directly to the customer.
 
 ## Setup & Usage
 
-### 1. Local Development
-```bash
-# Install dependencies
-uv sync
+### 1. Run the Environment (Docker)
 
-# Run the FastAPI server
-python -m uvicorn server.app:app --host 0.0.0.0 --port 8000 --env-file .env
+This environment is containerized and ready to deploy to Hugging Face Spaces.
+
+```bash
+docker build -t support_env .
+docker run -p 8000:8000 support_env
+```
+
+### 2. Run Inference (Evaluation)
+
+We provide a baseline inference.py script that utilizes the OpenAI API client format to run evaluations.
+
+```bash
+# Set your environment variables
+export ENV_URL="http://localhost:8000"
+export API_BASE_URL="[https://router.huggingface.co/v1](https://router.huggingface.co/v1)"
+export MODEL_NAME="gemini-3.1-flash-lite-preview"
+export HF_TOKEN="your_token_here"
+
+# Run the evaluation
+python inference.py > output.log
