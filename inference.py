@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime
 
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from openai import OpenAI
 
 # Global environment loading (soft-load for submission)
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
@@ -104,8 +104,8 @@ async def main():
             f"Wall budget: {INFERENCE_MAX_SECONDS}s (INFERENCE_MAX_SECONDS).\n"
         )
 
-        # Use AsyncOpenAI instead of OpenAI
-        client = AsyncOpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+        # Use standard OpenAI client as requested by hackathon
+        client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
         openai_tools = [
             {"type": "function", "function": {"name": "read_ticket", "description": "Read ticket.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}}, "required": ["thought"]}}},
@@ -173,7 +173,7 @@ async def main():
                     api_success = False
                     for attempt in range(3):
                         try:
-                            response = await client.chat.completions.create(
+                            response = client.chat.completions.create(
                                 model=MODEL_NAME,
                                 messages=messages,
                                 tools=openai_tools,
