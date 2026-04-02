@@ -11,5 +11,6 @@ __pycache__/
 *.pywz
 *.pyzw
 *.pyzwz
-
+*.txt
+*.log
 

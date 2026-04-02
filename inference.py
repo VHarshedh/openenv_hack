@@ -11,48 +11,29 @@ from datetime import datetime
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
-# Only the real `.env` next to this file (not cwd, not `.env.example`).
+# Global environment loading (soft-load for submission)
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
-if not _ENV_PATH.is_file():
-    print(f"❌ ERROR: Missing {_ENV_PATH}", file=sys.stderr)
-    print("   Create that file and set ENV_URL, API_BASE_URL, MODEL_NAME, HF_TOKEN.", file=sys.stderr)
-    sys.exit(1)
-load_dotenv(_ENV_PATH, override=True)
-
+load_dotenv(_ENV_PATH if _ENV_PATH.is_file() else None, override=True)
 
 def log_info(msg: str):
     """Utility to print non-essential logs to stderr so stdout remains pure for the grader."""
     print(msg, file=sys.stderr)
 
-
 def _strip(s: str | None) -> str:
     return (s or "").strip()
 
+# Resilient environment variable loading
+HF_TOKEN = _strip(os.getenv("HF_TOKEN") or os.getenv("API_KEY"))
+API_BASE_URL = _strip(os.getenv("API_BASE_URL", "https://api.openai.com/v1"))
+MODEL_NAME = _strip(os.getenv("MODEL_NAME", "gpt-4o"))
+ENV_URL = _strip(os.getenv("ENV_URL", "http://localhost:8000")).rstrip("/")
+LOCAL_IMAGE_NAME = _strip(os.getenv("LOCAL_IMAGE_NAME", "support_env_image"))
 
-_REQUIRED = ("HF_TOKEN", "ENV_URL", "API_BASE_URL", "MODEL_NAME")
-_missing = [k for k in _REQUIRED if not _strip(os.getenv(k))]
-if _missing:
-    log_info(f"❌ ERROR: {_ENV_PATH} is missing keys: {', '.join(_missing)}")
-    sys.exit(1)
-
-HF_TOKEN = _strip(os.getenv("HF_TOKEN"))
-if "PASTE" in HF_TOKEN:
-    log_info("❌ ERROR: Replace placeholder HF_TOKEN in .env.")
-    sys.exit(1)
-
-ENV_URL = _strip(os.getenv("ENV_URL")).rstrip("/")
-API_BASE_URL = _strip(os.getenv("API_BASE_URL"))
-MODEL_NAME = _strip(os.getenv("MODEL_NAME"))
-
-# ---------------------------------------------------------------------------
-# Configuration (defaults below are optional tuning only)
-# ---------------------------------------------------------------------------
+# Optional wall-clock budget for the whole run
+INFERENCE_MAX_SECONDS = int(os.getenv("INFERENCE_MAX_SECONDS", "1200"))
 
 NUM_TASKS = 6
 MAX_STEPS_PER_TASK = 15
-
-# Wall-clock budget for the whole run (default 20 minutes for hackathon validators)
-INFERENCE_MAX_SECONDS = int(os.getenv("INFERENCE_MAX_SECONDS", "1200"))
 
 
 def _step_delay_seconds() -> int:
