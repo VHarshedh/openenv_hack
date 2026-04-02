@@ -14,10 +14,15 @@ from openai import AsyncOpenAI
 # Only the real `.env` next to this file (not cwd, not `.env.example`).
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
 if not _ENV_PATH.is_file():
-    print(f"❌ ERROR: Missing {_ENV_PATH}")
-    print("   Create that file and set ENV_URL, API_BASE_URL, MODEL_NAME, HF_TOKEN.")
+    print(f"❌ ERROR: Missing {_ENV_PATH}", file=sys.stderr)
+    print("   Create that file and set ENV_URL, API_BASE_URL, MODEL_NAME, HF_TOKEN.", file=sys.stderr)
     sys.exit(1)
 load_dotenv(_ENV_PATH, override=True)
+
+
+def log_info(msg: str):
+    """Utility to print non-essential logs to stderr so stdout remains pure for the grader."""
+    print(msg, file=sys.stderr)
 
 
 def _strip(s: str | None) -> str:
@@ -27,12 +32,12 @@ def _strip(s: str | None) -> str:
 _REQUIRED = ("HF_TOKEN", "ENV_URL", "API_BASE_URL", "MODEL_NAME")
 _missing = [k for k in _REQUIRED if not _strip(os.getenv(k))]
 if _missing:
-    print(f"❌ ERROR: {_ENV_PATH} is missing keys: {', '.join(_missing)}")
+    log_info(f"❌ ERROR: {_ENV_PATH} is missing keys: {', '.join(_missing)}")
     sys.exit(1)
 
 HF_TOKEN = _strip(os.getenv("HF_TOKEN"))
 if "PASTE" in HF_TOKEN:
-    print("❌ ERROR: Replace placeholder HF_TOKEN in .env.")
+    log_info("❌ ERROR: Replace placeholder HF_TOKEN in .env.")
     sys.exit(1)
 
 ENV_URL = _strip(os.getenv("ENV_URL")).rstrip("/")
@@ -87,14 +92,14 @@ async def main():
 
     def time_budget_exceeded() -> bool:
         if time_elapsed() >= INFERENCE_MAX_SECONDS:
-            print(
+            log_info(
                 f"❌ Stopping: INFERENCE_MAX_SECONDS ({INFERENCE_MAX_SECONDS}s) exceeded. "
                 "Set STEP_DELAY_SECONDS=0 or raise INFERENCE_MAX_SECONDS if needed."
             )
             return True
         return False
 
-    print("⏳ Waiting for environment server to start...")
+    log_info("⏳ Waiting for environment server to start...")
     _server_ok = False
     
     # Use httpx.AsyncClient for non-blocking HTTP requests
@@ -108,12 +113,12 @@ async def main():
                 await asyncio.sleep(2)
                 
         if not _server_ok:
-            print("❌ ERROR: Environment server is not reachable after 10 retries!")
+            log_info("❌ ERROR: Environment server is not reachable after 10 retries!")
             sys.exit(1)
             
-        print("✅ Environment server is reachable!")
-        print(f"🚀 Starting inference with {MODEL_NAME}...")
-        print(
+        log_info("✅ Environment server is reachable!")
+        log_info(f"🚀 Starting inference with {MODEL_NAME}...")
+        log_info(
             f"⏳ Step delay: {step_delay}s between steps (set STEP_DELAY_SECONDS to override). "
             f"Wall budget: {INFERENCE_MAX_SECONDS}s (INFERENCE_MAX_SECONDS).\n"
         )
@@ -141,7 +146,11 @@ async def main():
             if time_budget_exceeded():
                 break
 
-            print(f"\n{'='*60}\n   TASK {task_idx + 1}\n{'='*60}")
+            log_info(f"\n{'='*60}\n   TASK {task_idx + 1}\n{'='*60}")
+
+            # >>> STDOUT MANDATORY REQUIREMENT: [START] <<<
+            task_name = f"task_{task_idx + 1}"
+            print(f"[START] task={task_name} env=support_env model={MODEL_NAME}", flush=True)
 
             # Sync the environment to the specific task index using await
             response = await http_client.post(f"{ENV_URL}/reset", json={"task_idx": task_idx}, timeout=10.0)
@@ -165,140 +174,168 @@ async def main():
             done = False
             step_count = 0
             final_reward = 0.0
+            rewards_history = []
 
-            while not done and step_count < MAX_STEPS_PER_TASK:
-                if time_budget_exceeded():
-                    break
-
-                step_count += 1
-
-                if step_count > 1:
-                    print(f"   ⏳ Waiting {step_delay}s before next step...")
-                    await asyncio.sleep(step_delay) # Non-blocking sleep
-
-                print(f"   --- Step {step_count} ---")
-
-                api_success = False
-                for attempt in range(3):
-                    try:
-                        # Non-blocking API call
-                        response = await client.chat.completions.create(
-                            model=MODEL_NAME,
-                            messages=messages,
-                            tools=openai_tools,
-                            tool_choice="required" if "gemini" not in MODEL_NAME.lower() else "auto",
-                            temperature=0.0,
-                        )
-                        api_success = True
+            try:
+                while not done and step_count < MAX_STEPS_PER_TASK:
+                    if time_budget_exceeded():
                         break
-                    except Exception as e:
-                        print(f"   ⚠ API error on attempt {attempt + 1}: {e}")
-                        if "429" in str(e) or "quota" in str(e).lower() or "503" in str(e):
-                            print("   🚨 Rate limit/Server busy. Cooling down for 30s...")
-                            await asyncio.sleep(30)
-                        else:
+
+                    step_count += 1
+
+                    if step_count > 1:
+                        log_info(f"   ⏳ Waiting {step_delay}s before next step...")
+                        await asyncio.sleep(step_delay)
+
+                    log_info(f"   --- Step {step_count} ---")
+
+                    api_success = False
+                    for attempt in range(3):
+                        try:
+                            response = await client.chat.completions.create(
+                                model=MODEL_NAME,
+                                messages=messages,
+                                tools=openai_tools,
+                                tool_choice="required" if "gemini" not in MODEL_NAME.lower() else "auto",
+                                temperature=0.0,
+                            )
+                            api_success = True
                             break
+                        except Exception as e:
+                            log_info(f"   ⚠ API error on attempt {attempt + 1}: {e}")
+                            if "429" in str(e) or "quota" in str(e).lower() or "503" in str(e):
+                                log_info("   🚨 Rate limit/Server busy. Cooling down for 30s...")
+                                await asyncio.sleep(30)
+                            else:
+                                break
 
-                if not api_success:
-                    print("   ❌ API failed after retries. Aborting task.")
-                    break
-
-                response_message = response.choices[0].message
-
-                if response_message.tool_calls and len(response_message.tool_calls) > 1:
-                    first_tc = response_message.tool_calls[0]
-                    messages.append({
-                        "role": "assistant",
-                        "content": response_message.content or None,
-                        "tool_calls": [{
-                            "id": first_tc.id,
-                            "type": "function",
-                            "function": {"name": first_tc.function.name, "arguments": first_tc.function.arguments},
-                        }],
-                    })
-                else:
-                    messages.append(response_message)
-
-                if response_message.tool_calls:
-                    tool_call = response_message.tool_calls[0]
-                    name = tool_call.function.name
-
-                    invalid_json = False
-                    try:
-                        raw_args = tool_call.function.arguments or "{}"
-                        args = json.loads(raw_args)
-                        if args is None:
-                            args = {}
-                    except json.JSONDecodeError:
-                        print(f"   ⚠ Model provided invalid JSON: {tool_call.function.arguments}")
-                        invalid_json = True
-                        args = {}
-
-                    if invalid_json:
-                        tool_out = "Error: Invalid JSON format. Please fix your syntax and try again."
-                        print(f"   📋 Result: {tool_out}")
-                        messages.append({"role": "tool", "tool_call_id": tool_call.id, "name": name, "content": tool_out})
-                        task_log["steps"].append({"action": "invalid_json", "error": tool_out})
-                        continue
-
-                    print(f"   🔧 Tool: {name}({json.dumps(args)})")
-
-                    step_payload = {"action": {"tool_name": name, "arguments": args}}
-                    if episode_id:
-                        step_payload["episode_id"] = episode_id
-
-                    # Non-blocking environment step
-                    step_resp = await http_client.post(
-                        f"{ENV_URL}/step",
-                        json=step_payload,
-                    )
-                    step_resp.raise_for_status()
-                    res = step_resp.json()
-
-                    res_data = res.get("observation")
-                    if res_data is None:
-                        tool_out = "Error: Environment returned no data."
-                    else:
-                        result_obj = res_data.get("result", "Success")
-                        if isinstance(result_obj, dict):
-                            tool_out = str(result_obj.get("data", result_obj))
-                        else:
-                            tool_out = str(result_obj)
-
-                    done = res.get("done", False)
-                    reward = res.get("reward", 0.0)
-                    print(f"   📋 Result: {tool_out[:100]}...")
-                    print(f"   💰 Reward: {round(reward, 2)}")
-
-                    messages.append({"role": "tool", "tool_call_id": tool_call.id, "name": name, "content": tool_out})
-                    
-                    task_log["steps"].append({
-                        "tool_name": name,
-                        "arguments": args,
-                        "result": tool_out,
-                        "reward": reward,
-                        "done": done
-                    })
-
-                    if done:
-                        final_reward = reward
-                        print(f"   ✅ Complete! Final Reward: {round(final_reward, 2)}")
+                    if not api_success:
+                        log_info("   ❌ API failed after retries. Aborting task.")
+                        # STDOUT failure step log before breaking
+                        print(f"[STEP] step={step_count} action=api_fail() reward=0.00 done=true error=\"API failed\"", flush=True)
                         break
+
+                    response_message = response.choices[0].message
+
+                    if response_message.tool_calls and len(response_message.tool_calls) > 1:
+                        first_tc = response_message.tool_calls[0]
+                        messages.append({
+                            "role": "assistant",
+                            "content": response_message.content or None,
+                            "tool_calls": [{
+                                "id": first_tc.id,
+                                "type": "function",
+                                "function": {"name": first_tc.function.name, "arguments": first_tc.function.arguments},
+                            }],
+                        })
+                    else:
+                        messages.append(response_message)
+
+                    if response_message.tool_calls:
+                        tool_call = response_message.tool_calls[0]
+                        name = tool_call.function.name
+
+                        invalid_json = False
+                        try:
+                            raw_args = tool_call.function.arguments or "{}"
+                            args = json.loads(raw_args)
+                            if args is None:
+                                args = {}
+                        except json.JSONDecodeError:
+                            log_info(f"   ⚠ Model provided invalid JSON: {tool_call.function.arguments}")
+                            invalid_json = True
+                            args = {}
+
+                        if invalid_json:
+                            tool_out = "Error: Invalid JSON format. Please fix your syntax and try again."
+                            log_info(f"   📋 Result: {tool_out}")
+                            messages.append({"role": "tool", "tool_call_id": tool_call.id, "name": name, "content": tool_out})
+                            task_log["steps"].append({"action": "invalid_json", "error": tool_out})
+                            
+                            rewards_history.append(0.0)
+                            print(f"[STEP] step={step_count} action={name}(invalid_json) reward=0.00 done=false error=\"invalid_json\"", flush=True)
+                            continue
+
+                        log_info(f"   🔧 Tool: {name}({json.dumps(args)})")
+
+                        step_payload = {"action": {"tool_name": name, "arguments": args}}
+                        if episode_id:
+                            step_payload["episode_id"] = episode_id
+
+                        step_resp = await http_client.post(
+                            f"{ENV_URL}/step",
+                            json=step_payload,
+                        )
+                        step_resp.raise_for_status()
+                        res = step_resp.json()
+
+                        res_data = res.get("observation")
+                        if res_data is None:
+                            tool_out = "Error: Environment returned no data."
+                        else:
+                            result_obj = res_data.get("result", "Success")
+                            if isinstance(result_obj, dict):
+                                tool_out = str(result_obj.get("data", result_obj))
+                            else:
+                                tool_out = str(result_obj)
+
+                        done = res.get("done", False)
+                        reward = res.get("reward", 0.0)
+                        
+                        log_info(f"   📋 Result: {tool_out[:100]}...")
+                        log_info(f"   💰 Reward: {round(reward, 2)}")
+
+                        messages.append({"role": "tool", "tool_call_id": tool_call.id, "name": name, "content": tool_out})
+                        
+                        task_log["steps"].append({
+                            "tool_name": name,
+                            "arguments": args,
+                            "result": tool_out,
+                            "reward": reward,
+                            "done": done
+                        })
+
+                        # >>> STDOUT MANDATORY REQUIREMENT: [STEP] <<<
+                        action_str = f"{name}({json.dumps(args)})"
+                        # Escape any newlines in action string just to be safe
+                        action_str = action_str.replace('\n', ' ').replace('\r', '')
+                        done_str = "true" if done else "false"
+                        rewards_history.append(reward)
+                        print(f"[STEP] step={step_count} action={action_str} reward={reward:.2f} done={done_str} error=null", flush=True)
+
+                        if done:
+                            final_reward = reward
+                            log_info(f"   ✅ Complete! Final Reward: {round(final_reward, 2)}")
+                            break
+                    else:
+                        safe_content = str(response_message.content or "No text provided.")
+                        log_info(f"   🤖 Agent chatted: {safe_content[:50]}...")
+                        messages.append({"role": "user", "content": "Focus. Use a tool to progress."})
+                        task_log["steps"].append({"action": "chat", "content": safe_content})
+                        
+                        rewards_history.append(0.0)
+                        # >>> STDOUT MANDATORY REQUIREMENT: [STEP] (for non-tool responses) <<<
+                        print(f"[STEP] step={step_count} action=chat() reward=0.00 done=false error=\"Did not call tool\"", flush=True)
+
+            finally:
+                # >>> STDOUT MANDATORY REQUIREMENT: [END] <<<
+                # (Executes even if exception occurs to ensure compliance)
+                success_str = "true" if done and final_reward > 0.0 else "false"
+                if not rewards_history:
+                    rewards_str = "0.00"
                 else:
-                    safe_content = str(response_message.content or "No text provided.")
-                    print(f"   🤖 Agent chatted: {safe_content[:50]}...")
-                    messages.append({"role": "user", "content": "Focus. Use a tool to progress."})
-                    task_log["steps"].append({"action": "chat", "content": safe_content})
+                    rewards_str = ",".join([f"{r:.2f}" for r in rewards_history])
+                print(f"[END] success={success_str} steps={step_count} rewards={rewards_str}", flush=True)
 
             task_log["final_reward"] = final_reward
             run_logs["tasks"].append(task_log)
             total_rewards.append(final_reward)
 
         if not total_rewards:
-            print("\n❌ No tasks completed.")
+            log_info("\n❌ No tasks completed.")
             sys.exit(1)
 
-        print(f"\n{'='*60}\n   SUMMARY: Average Reward: {round(sum(total_rewards)/len(total_rewards), 2)}\n{'='*60}")
+        log_info(f"\n{'='*60}\n   SUMMARY: Average Reward: {round(sum(total_rewards)/len(total_rewards), 2)}\n{'='*60}")
         
         # Save detailed logs
         os.makedirs("results", exist_ok=True)
@@ -308,9 +345,8 @@ async def main():
         
         with open(log_file, "w") as f:
             json.dump(run_logs, f, indent=2)
-        print(f"📁 Detailed run logs saved to {log_file}")
+        log_info(f"📁 Detailed run logs saved to {log_file}")
 
 
 if __name__ == "__main__":
-    # Bootstraps the async event loop
     asyncio.run(main())
