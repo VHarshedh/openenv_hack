@@ -36,12 +36,15 @@ The environment contains 6 distinct tasks of escalating difficulty.
 
 | Task | Difficulty | Objective | Expected Steps | 
 | ----- | ----- | ----- | ----- | 
-| 1 | **Easy** | Reset a password by verifying identity via the KB. | 3 | 
+| 1 | **Easy** | Reset a password by verifying identity via the KB. | 4 | 
 | 2 | **Medium** | Process a refund after checking the database for recent duplicate transactions. | 4 | 
 | 3 | **Hard** | Deep Diagnosis: Troubleshoot an Error 500 on a Suspended account, requiring security escalation. | 4 | 
-| 4 | **Trap** | Conflict Awareness: Handle a user asking for both a refund AND deletion, requiring the agent to synthesize competing KB policies. | 5 | 
+| 4 | **Trap** | Conflict Awareness: Handle a user asking for both a refund AND account deletion. Agent must search **both** the refund policy and the account deletion policy, then escalate to **billing**. | 4 | 
 | 5 | **Multi-Hop** | Shadow Ban Protocol: Agent must map an Error X77 to a secondary, hidden security protocol. | 5 | 
-| 6 | **Ultra** | Project Aegis: Agent must navigate a deprecated policy, discover a hidden internal memo, find a mapped "Real UID", check a secondary Auditor status, and hit a dead-end requiring human manager ping before escalating. | 8 | 
+| 6 | **Ultra** | Project Aegis: Agent must follow a deprecated policy chain, discover a hidden internal memo, resolve a Real UID alias, verify a Compliance Auditor's DB status via a strict 3-hop database sequence, and escalate to the correct department. | 8 | 
+| 7 | **VIP** | VIP Payment Update: Agent must detect a VIP flag in the CRM and route to **billing** instead of resolving directly. | 5 | 
+| 8 | **Breach** | Security Breach Report: Agent must follow a 2-hop DB + KB chain to verify a Security Auditor's status and escalate to **engineering**. | 6 | 
+| 9 | **Mega** | Mega Chain: Triple-flag account (X77 + compliance hold + shadow ban). Agent must traverse 3 intersecting policy chains and 2 DB hops to identify the correct **engineering** escalation path. | 10 | 
 
 ## Model Benchmarks & Analysis
 
@@ -60,7 +63,7 @@ We ran inference across 5 different models to establish baselines. The strict 60
 1. **SOP Adherence vs. Task Completion:** The data proves that while large models might eventually guess the correct final department, they struggle to strictly adhere to corporate Standard Operating Procedures (SOPs). Heavy penalties for bypassing the Knowledge Base or prematurely pinging human managers (-0.3 deduction) successfully differentiate true reasoning agents from lucky guessers.
 2. **The Overconfidence Penalty:** `Llama-3.3-70B` scored the lowest because it was overconfident. Instead of following the SOP to search the knowledge base first, it frequently guessed the escalation department immediately based on its pre-trained weights. Our strict grader severely penalized this lack of methodology.
 3. **Infinite Tool Loops:** The smaller 7B and 8B models frequently fell into infinite tool loops. For example, `Qwen 2.5 7B` failed Task 5 because it called `read_ticket` 15 times in a row. `Llama 3.3 70B` bizarrely called `check_billing` 14 consecutive times on Task 4.
-4. **The Ultra Task (Project Aegis):** No model was able to fully solve Task 6. Even the top performer (Gemini) successfully navigated the multi-hop database lookup but failed to synthesize the final rule after the manager ping returned a system auto-reply.
+4. **The Ultra Task (Project Aegis):** No model was able to fully solve Task 6. Even the top performer (Gemini) successfully navigated the multi-hop database lookup but failed to synthesize the correct escalation department from the Aegis Audit routing rule.
 
 ## Action & Observation Spaces
 
@@ -81,7 +84,7 @@ The agent interacts with the environment via 6 typed tools. **Every tool strictl
 1. `read_ticket(thought)`: Reads the inbound customer message.
 2. `search_knowledge_base(thought, query)`: Searches the internal policy KB.
 3. `check_billing(thought, user_id)`: Checks account status and CRM notes.
-4. `ping_human_manager(thought, reason)`: Requests assistance on undocumented edge cases.
+4. `ping_human_manager(thought, reason)`: Decoy trap. Always triggers a −0.3 reward penalty regardless of task. Agents must use the Knowledge Base and database to resolve every scenario without human intervention.
 5. `escalate_ticket(thought, department)`: Terminal action. Routes the ticket.
 6. `resolve_ticket(thought, message)`: Terminal action. Replies directly to the customer.
 
@@ -109,3 +112,4 @@ export HF_TOKEN="your_token_here"
 
 # Run the evaluation
 python inference.py > output.log
+```

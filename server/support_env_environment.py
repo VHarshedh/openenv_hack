@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import re
 import random
 import contextvars
 from datetime import datetime, timedelta
@@ -24,17 +25,127 @@ from fastmcp import FastMCP
 _active_env = contextvars.ContextVar('_active_env')
 
 KNOWLEDGE_BASE = {
-    # Core Policies
-    "password reset procedure": "POLICY: Password Reset\n1. Verify identity.\n2. Send link.",
-    "duplicate charge refund policy": "POLICY: Refund Policy\n1. Refunds within 30 days.",
-    "suspended account error": "POLICY: Account Mgmt\n1. 500 error + 'suspended' -> SECURITY.",
+    # Core Policies — Tasks 1-6
+    "password reset procedure":               "POLICY: Password Reset\n1. Verify identity.\n2. Send link.",
+    "duplicate charge refund policy":         "POLICY: Refund Policy\n1. Refunds within 30 days.",
+    "suspended account error":                "POLICY: Account Mgmt\n1. 500 error + 'suspended' -> SECURITY.",
     "refund policy account deletion conflict": "POLICY: Conflict\n1. Refund + Deletion -> BILLING.",
-    "error code x77 payment failure": "POLICY: X77\n1. If 'active', search KB for 'Shadow Ban Protocol'.",
-    "shadow ban protocol security": "POLICY: Shadow Ban\n1. ACTION: Escalate to SECURITY.",
-    "email change request": "DEPRECATED POLICY (v1.2): For email changes, see 'Project Aegis' Internal Memo for latest security requirements.",
-    "project aegis memo": "POLICY: Aegis Security\n1. If account has 'Real UID' mapping, you MUST verify the 'Compliance Auditor'.\n2. IF ticket date is within 48 hours of last transaction: Escalation is MANDATORY.\n3. Search KB for 'Aegis Audit' for final routing.",
-    "aegis audit routing": "POLICY: Aegis Audit\n1. If Compliance Auditor status is NOT 'green', escalate to SECURITY.\n2. If Compliance Auditor is 'green' but account is 'flagged', escalate to BILLING.",
+    "error code x77 payment failure":         "POLICY: X77\n1. If 'active', search KB for 'Shadow Ban Protocol'.",
+    "shadow ban protocol security":           "POLICY: Shadow Ban\n1. ACTION: Escalate to SECURITY.",
+    "email change request":                   "DEPRECATED POLICY (v1.2): For email changes, see 'Project Aegis' Internal Memo for latest security requirements.",
+    "project aegis memo":                     "POLICY: Aegis Security\n1. If account has 'Real UID' mapping, you MUST verify the 'Compliance Auditor'.\n2. IF ticket date is within 48 hours of last transaction: Escalation is MANDATORY.\n3. Search KB for 'Aegis Audit' for final routing.",
+    "aegis audit routing":                    "POLICY: Aegis Audit\n1. If Compliance Auditor status is NOT 'green', escalate to SECURITY.\n2. If Compliance Auditor is 'green' but account is 'flagged', escalate to BILLING.",
+    # Task 7 — VIP Payment Update
+    "vip account policy":    "POLICY: VIP Account Mgmt\n1. Accounts with 'vip_flag' = true MUST be escalated to BILLING, not Security.\n2. Do NOT resolve directly.",
+    "payment method update": "POLICY: Payment Update\n1. Standard accounts: resolve directly.\n2. VIP accounts: see 'VIP Account Policy'.",
+    # Task 8 — Security Breach
+    "unauthorized access":   "POLICY: Unauthorized Login\n1. Collect breach details.\n2. Search KB for 'Data Breach Protocol'.",
+    "data breach protocol":  "POLICY: Security Incident\n1. Verify with assigned Security Auditor.\n2. If Auditor status is 'active': escalate to ENGINEERING.\n3. If Auditor is NOT 'active': escalate to SECURITY immediately.",
+    # Task 9 — Mega Chain
+    "compliance hold policy":        "POLICY: Compliance Hold\n1. Accounts with 'compliance_hold' = true must NOT be modified.\n2. Verify with Compliance Auditor UID before any action.",
+    "compliance resolution":         "POLICY: Compliance Resolution\n1. Auditor 'green': resolve account action.\n2. Auditor NOT 'green': escalate to SECURITY.\n3. If BOTH compliance_hold AND shadow_ban are active: escalate to ENGINEERING.",
+    "shadow compliance intersection": "POLICY: Shadow + Compliance\n1. A Shadow Ban and Compliance Hold active simultaneously require ENGINEERING escalation.",
+    # Decoy deprecated articles
+    "legacy password policy v1":     "DEPRECATED (v0.9): Password resets via phone call are no longer supported. Refer to the current 'password reset procedure'.",
+    "general escalation guidelines": "DEPRECATED: All escalations were previously routed to engineering by default. This policy is superseded by department-specific routing rules.",
 }
+
+# ---------------------------------------------------------------------------
+# Module-level helpers and routing constants
+# ---------------------------------------------------------------------------
+
+def _tokenize(text: str) -> set:
+    """Return a set of lowercase word-boundary tokens. Prevents substring false positives."""
+    return set(re.findall(r'\b[a-z0-9]+\b', text.lower()))
+
+
+# Canonical trigger words for god-query detection
+_CANONICAL_TRIGGERS: frozenset = frozenset({
+    "password", "refund", "delete", "account", "500",
+    "suspended", "x77", "email", "aegis", "audit", "shadow",
+    "vip", "breach", "compliance",
+})
+
+# KB routing table: synonym-expanded, word-boundary safe.
+# Each entry: synonyms (set), milestone (str|None), KB key (str), guard (lambda tokens->bool)
+KB_ROUTES: list = [
+    # --- Tasks 1-6 ---
+    {"synonyms": {"password","reset","locked","lock","login","credential","lockout"},
+     "milestone": "found_password_policy", "key": "password reset procedure",
+     "guard": lambda t: True},
+    {"synonyms": {"refund","duplicate","double","charged","overcharged","billed"},
+     "milestone": "found_refund_policy", "key": "duplicate charge refund policy",
+     "guard": lambda t: not (t & {"delete","account","removal","cancel","conflict"})},
+    {"synonyms": {"refund","delete","account","removal","cancel","conflict","deletion"},
+     "milestone": "found_account_policy", "key": "refund policy account deletion conflict",
+     "guard": lambda t: ("refund" in t and bool(t & {"delete","account","removal","cancel","conflict","deletion"})) or "conflict" in t},
+    {"synonyms": {"500","suspended","suspension"},
+     "milestone": "found_500_policy", "key": "suspended account error",
+     "guard": lambda t: bool(t & {"500","suspended","suspension"})},
+    {"synonyms": {"x77"},
+     "milestone": "found_x77_policy", "key": "error code x77 payment failure",
+     "guard": lambda t: "x77" in t},
+    {"synonyms": {"shadow","shadowban"},
+     "milestone": "found_shadow_policy", "key": "shadow ban protocol security",
+     "guard": lambda t: "shadow" in t},
+    {"synonyms": {"email","mail"},
+     "milestone": "found_email_policy", "key": "email change request",
+     "guard": lambda t: bool(t & {"email","mail"})},
+    {"synonyms": {"aegis","memo"},
+     "milestone": "found_aegis_memo", "key": "project aegis memo",
+     "guard": lambda t: "aegis" in t and "audit" not in t},
+    {"synonyms": {"audit","auditor"},
+     "milestone": "found_aegis_audit", "key": "aegis audit routing",
+     "guard": lambda t: "audit" in t},
+    # --- Task 7 ---
+    {"synonyms": {"vip","premium","priority"},
+     "milestone": "found_vip_policy", "key": "vip account policy",
+     "guard": lambda t: "vip" in t},
+    {"synonyms": {"payment","method","update","card"},
+     "milestone": "found_payment_policy", "key": "payment method update",
+     "guard": lambda t: bool(t & {"payment","method","update","card"})},
+    # --- Task 8 ---
+    {"synonyms": {"unauthorized","suspicious","hacked","intrusion"},
+     "milestone": "found_unauthorized_policy", "key": "unauthorized access",
+     "guard": lambda t: bool(t & {"unauthorized","suspicious","hacked","intrusion"})},
+    {"synonyms": {"breach","incident"},
+     "milestone": "found_breach_policy", "key": "data breach protocol",
+     "guard": lambda t: bool(t & {"breach","incident"})},
+    # --- Task 9 ---
+    {"synonyms": {"compliance","hold","frozen"},
+     "milestone": "found_compliance_hold", "key": "compliance hold policy",
+     "guard": lambda t: "compliance" in t and "resolution" not in t and "shadow" not in t},
+    {"synonyms": {"compliance","resolution"},
+     "milestone": "found_compliance_resolution", "key": "compliance resolution",
+     "guard": lambda t: "compliance" in t and "resolution" in t},
+    {"synonyms": {"shadow","compliance"},
+     "milestone": "found_shadow_compliance", "key": "shadow compliance intersection",
+     "guard": lambda t: "shadow" in t and "compliance" in t},
+    # --- Decoys (no milestone) ---
+    {"synonyms": {"phone","legacy"},
+     "milestone": None, "key": "legacy password policy v1",
+     "guard": lambda t: "phone" in t},
+    {"synonyms": {"escalation","general"},
+     "milestone": None, "key": "general escalation guidelines",
+     "guard": lambda t: "escalation" in t and "audit" not in t and "aegis" not in t},
+]
+
+# Maps difficulty string to task index (used by reset() difficulty kwarg)
+_DIFFICULTY_MAP: dict = {
+    "easy": 0, "medium": 1, "hard": 2, "trap": 3,
+    "multi_hop": 4, "ultra": 5, "vip": 6, "breach": 7, "mega": 8,
+}
+
+# Historical CRM noise injected into each task user's DB record on reset()
+CRM_NOISE: list = [
+    "NOTE (6 months ago): User inquired about a refund. Case closed.",
+    "NOTE (3 months ago): Password reset completed successfully.",
+    "NOTE (90 days ago): Billing dispute raised. No action taken.",
+    "NOTE (1 year ago): Account suspension requested. Reinstated.",
+    "NOTE (2 months ago): Flagged for suspicious login. Security cleared.",
+    "NOTE (8 months ago): Duplicate charge reported. Refunded.",
+    "NOTE (4 months ago): User requested feature upgrade. Forwarded to product.",
+]
 
 class SupportEnvironment(MCPEnvironment):
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
@@ -52,7 +163,7 @@ class SupportEnvironment(MCPEnvironment):
         self._db: dict = {}
         self._active_noise_policies: list[dict] = []
         
-        # Dynamic Target Placeholders
+        # Dynamic Target Placeholders — Tasks 1-6
         self._target_easy = ""
         self._target_medium = ""
         self._target_hard = ""
@@ -61,6 +172,12 @@ class SupportEnvironment(MCPEnvironment):
         self._target_ultra = ""
         self._real_uid = ""
         self._auditor_uid = ""
+        # Dynamic Target Placeholders — Tasks 7-9
+        self._target_vip = ""
+        self._target_breach = ""
+        self._target_mega = ""
+        self._breach_auditor_uid = ""
+        self._mega_compliance_uid = ""
 
         self._progress: dict = {
             "read": False, 
@@ -72,6 +189,7 @@ class SupportEnvironment(MCPEnvironment):
             "god_query": False,
             "teleported": False,
             "lazy_resolution": False,
+            "sop_violations": 0,
             "milestones": set(),
             "queried_users": set(),
             # Tracking Instruction Following (40% of grade)
@@ -100,57 +218,37 @@ class SupportEnvironment(MCPEnvironment):
             env._record_tool_use("search_knowledge_base")
             if not env._progress["read"]: env._progress["out_of_order"] = True
 
-            q = query.lower()
-            
-            # Anti-Cheat 1: God Query (Milestone Spoofing)
-            trigger_words = ["password", "refund", "delete", "account", "500", "suspended", "x77", "email", "aegis", "audit", "shadow"]
+            tokens = _tokenize(query)
+
+            # Anti-Cheat: God Query — count canonical + noise hits (word-boundary safe)
+            noise_kws: set = set()
             for p in env._active_noise_policies:
-                trigger_words.extend(p["keywords"])
-                
-            hits = sum(1 for k in trigger_words if k in q)
-            if hits > 3:
+                noise_kws.update(p["keywords"])
+            total_hits = len(tokens & _CANONICAL_TRIGGERS) + len(tokens & noise_kws)
+            if total_hits > 3:
                 env._progress["god_query"] = True
                 return "SYSTEM ERROR: Query too broad. Please refine your search to specific keywords."
 
             results = []
-            
-            # Core Routes
-            if "password" in q: results.append(KNOWLEDGE_BASE["password reset procedure"])
-            if "refund" in q and not ("delete" in q or "account" in q or "conflict" in q): 
-                results.append(KNOWLEDGE_BASE["duplicate charge refund policy"])
-            if ("refund" in q and ("delete" in q or "account" in q)) or "conflict" in q:
-                results.append(KNOWLEDGE_BASE["refund policy account deletion conflict"])
-            if "500" in q or "suspended" in q:
-                results.append(KNOWLEDGE_BASE["suspended account error"])
-            if "x77" in q:
-                results.append(KNOWLEDGE_BASE["error code x77 payment failure"])
-            if "shadow" in q:
-                results.append(KNOWLEDGE_BASE["shadow ban protocol security"])
-            if "email" in q:
-                results.append(KNOWLEDGE_BASE["email change request"])
-            if "aegis" in q and "audit" not in q:
-                results.append(KNOWLEDGE_BASE["project aegis memo"])
-            if "audit" in q:
-                results.append(KNOWLEDGE_BASE["aegis audit routing"])
-                
-            # Noise Routes (Dynamic)
+
+            # Route via KB_ROUTES (synonym-expanded, word-boundary safe)
+            for route in KB_ROUTES:
+                if tokens & route["synonyms"] and route["guard"](tokens):
+                    text = KNOWLEDGE_BASE.get(route["key"], "")
+                    if text and text not in results:
+                        results.append(text)
+                        if env._progress["read"] and route["milestone"]:
+                            env._progress["milestones"].add(route["milestone"])
+
+            # Noise Routes (Dynamic — unchanged logic)
+            q = query.lower()
             for p in env._active_noise_policies:
                 if any(k in q for k in p["keywords"]):
                     results.append(p["text"])
-            
+
             if results and env._progress["read"]:
                 env._progress["searched_kb"] = True
-                # Milestones
-                if "password" in q: env._progress["milestones"].add("found_password_policy")
-                if "refund" in q or "duplicate" in q: env._progress["milestones"].add("found_refund_policy")
-                if "account" in q or "delete" in q or "deletion" in q: env._progress["milestones"].add("found_account_policy")
-                if "500" in q or "suspended" in q: env._progress["milestones"].add("found_500_policy")
-                if "x77" in q: env._progress["milestones"].add("found_x77_policy")
-                if "email" in q: env._progress["milestones"].add("found_email_policy")
-                if "aegis" in q: env._progress["milestones"].add("found_aegis_memo")
-                if "audit" in q: env._progress["milestones"].add("found_aegis_audit")
-                if "shadow" in q: env._progress["milestones"].add("found_shadow_policy")
-                    
+
             return "\n\n".join(results) if results else "No specific policies found."
 
         @mcp.tool
@@ -159,27 +257,47 @@ class SupportEnvironment(MCPEnvironment):
             env = _active_env.get()
             env._validate_thought(thought)
             env._record_tool_use("check_billing")
-            
             if not env._progress["read"]: env._progress["out_of_order"] = True
 
-            # Anti-Cheat: Teleportation prevents mind-reading dynamically generated inner IDs
+            # Anti-Cheat: Teleportation — Tasks 1-6
             if user_id == env._real_uid and "found_aegis_memo" not in env._progress["milestones"]:
                 env._progress["teleported"] = True
-            if user_id == env._auditor_uid and ("checked_real_uid" not in env._progress["milestones"] or "found_aegis_audit" not in env._progress["milestones"]):
+            if user_id == env._auditor_uid and (
+                "checked_real_uid" not in env._progress["milestones"]
+                or "found_aegis_audit" not in env._progress["milestones"]
+            ):
+                env._progress["teleported"] = True
+            # Anti-Cheat: Teleportation — Tasks 7-9
+            if user_id == env._breach_auditor_uid and "found_breach_policy" not in env._progress["milestones"]:
+                env._progress["teleported"] = True
+            if user_id == env._mega_compliance_uid and env._target_mega not in env._progress["queried_users"]:
                 env._progress["teleported"] = True
 
             env._progress["queried_users"].add(user_id)
             user = env._db.get(user_id)
             if not user: return f"User {user_id} not found."
-            
+
             if env._progress["read"]:
                 env._progress["checked_db"] = True
-                if user_id == env._real_uid: env._progress["milestones"].add("checked_real_uid")
-                if user_id == env._auditor_uid: env._progress["milestones"].add("checked_compliance_auditor")
+                # Task 6 milestones
+                if user_id == env._real_uid:          env._progress["milestones"].add("checked_real_uid")
+                if user_id == env._auditor_uid:       env._progress["milestones"].add("checked_compliance_auditor")
+                # Task 8 milestones
+                if user_id == env._breach_auditor_uid: env._progress["milestones"].add("checked_breach_auditor")
+                # Task 9 milestones
+                if user_id == env._mega_compliance_uid: env._progress["milestones"].add("checked_mega_auditor")
 
             res = f"Account: {user['name']}\nStatus: {user['status']}\nLast Txn: {user.get('last_txn', 'N/A')}"
-            if "real_uid" in user: res += f"\nNote: Real UID is {user['real_uid']}"
-            if "compliance_auditor" in user: res += f"\nAssigned Auditor: {user['compliance_auditor']}"
+            if "real_uid" in user:              res += f"\nNote: Real UID is {user['real_uid']}"
+            if "compliance_auditor" in user:    res += f"\nAssigned Auditor: {user['compliance_auditor']}"
+            if "security_auditor" in user:      res += f"\nSecurity Auditor: {user['security_auditor']}"
+            if user.get("vip_flag"):            res += "\nAccount Type: VIP"
+            if user.get("security_incident"):   res += "\nAlert: Security Incident Reported"
+            if user.get("compliance_hold"):     res += "\nFlag: Compliance Hold Active"
+            if user.get("shadow_ban"):          res += "\nFlag: Shadow Ban Active"
+            if user.get("x77_flag"):            res += "\nError: X77 Payment Failure Detected"
+            if "crm_notes" in user:
+                res += f"\nCRM History: {' | '.join(user['crm_notes'])}"
             return res
             
         @mcp.tool
@@ -196,6 +314,18 @@ class SupportEnvironment(MCPEnvironment):
             """Escalate to billing, engineering, or security."""
             env = _active_env.get()
             env._validate_thought(thought)
+            # Process Supervision: SOP soft-block (easy tasks exempt — no DB check required)
+            diff = env._current_task.get("difficulty", "")
+            if not env._progress["checked_db"] and diff != "easy":
+                if env._progress["sop_violations"] < 3:
+                    env._progress["sop_violations"] += 1
+                    warn_n = env._progress["sop_violations"]
+                    return (
+                        f"⚠️ SYSTEM_REJECT: SOP VIOLATION — You must verify the user's "
+                        f"account status in the billing CRM before escalating. "
+                        f"Call check_billing first, then retry. [Warning {warn_n}/3]"
+                    )
+                # 4th+ attempt after 3 warnings — fall through and finalise
             env._finalize_episode("escalate", department=department)
             return f"Escalated to {department.upper()}."
 
@@ -204,18 +334,42 @@ class SupportEnvironment(MCPEnvironment):
             """Resolve ticket."""
             env = _active_env.get()
             env._validate_thought(thought)
-            
-            # Anti-Cheat: Lazy Resolution
-            if len(message.strip().split()) < 5:
-                env._progress["lazy_resolution"] = True
-                
+
+            # Process Supervision: must read ticket first
+            if not env._progress["read"]:
+                if env._progress["sop_violations"] < 3:
+                    env._progress["sop_violations"] += 1
+                    warn_n = env._progress["sop_violations"]
+                    return (
+                        f"⚠️ SYSTEM_REJECT: SOP VIOLATION — You must read the ticket "
+                        f"using read_ticket before attempting to resolve it. "
+                        f"[Warning {warn_n}/3]"
+                    )
+
             msg_lower = message.lower()
             diff = env._current_task.get("difficulty")
+
+            # Anti-Cheat 1: Hallucinated placeholder detection.
+            if re.search(r"\[[^\]]+\]", message) or re.search(r"<[^>]+>", message):
+                env._progress["lazy_resolution"] = True
+
+            # Anti-Cheat 2: Name/ID grounding check (easy + medium only).
+            if diff in ("easy", "medium"):
+                target_user = env._current_task.get("target_user", "")
+                db_record = env._db.get(target_user, {})
+                user_name = db_record.get("name", "").lower()
+                name_parts = [p.strip() for p in user_name.split() if len(p.strip()) > 2]
+                id_present = target_user.lower() in msg_lower
+                name_present = any(part in msg_lower for part in name_parts) if name_parts else False
+                if not (id_present or name_present):
+                    env._progress["lazy_resolution"] = True
+
+            # Anti-Cheat 3: Difficulty-specific content check.
             if diff == "easy" and not any(w in msg_lower for w in ["password", "reset", "link", "email"]):
                 env._progress["lazy_resolution"] = True
             if diff == "medium" and not any(w in msg_lower for w in ["refund", "process", "duplicate", "charge"]):
                 env._progress["lazy_resolution"] = True
-                
+
             env._finalize_episode("resolve")
             return "Resolved."
 
@@ -235,47 +389,63 @@ class SupportEnvironment(MCPEnvironment):
         thought_lower = thought.lower()
         
         # Step 1: Identify all distinct requests (Can happen anytime)
-        if any(w in thought_lower for w in ["request", "distinct", "issue", "problem", "ticket", "user wants"]):
+        if any(w in thought_lower for w in [
+            "request", "distinct", "issue", "problem", "ticket",
+            "user wants", "inquiry", "wants", "needs", "asking", "complaint"
+        ]):
             self._progress["thought_identified_request"] = True
             
         # Step 2: Note specific states (Context-Aware: Only valid if they have actually queried the DB)
         if self._progress.get("checked_db", False):
-            if any(w in thought_lower for w in ["status", "active", "suspended", "state", "red-flag"]):
+            if any(w in thought_lower for w in [
+                "status", "active", "suspended", "state", "red-flag",
+                "banned", "disabled", "status is", "found in db"
+            ]):
                 self._progress["thought_noted_state"] = True
                 
         # Step 3/4: Cross-reference & Verify against KB (Context-Aware: Only valid if they searched KB)
         if self._progress.get("searched_kb", False):
-            if any(w in thought_lower for w in ["policy", "knowledge base", "kb", "escalation", "verify", "rule", "protocol"]):
+            if any(w in thought_lower for w in [
+                "policy", "knowledge base", "kb", "escalation", "verify", "rule", "protocol",
+                "guidelines", "rules", "instructions", "sop", "standard operating procedure"
+            ]):
                 self._progress["thought_verified_kb"] = True
 
-    def _generate_random_noise_policies(self, count: int) -> list[dict]:
-        """Procedurally generates completely random noise policies."""
-        topics = [
-            (["dress", "code", "attire"], "Business attire", "is required on level", str(random.randint(1, 5))),
-            (["lunch", "reimbursement", "food"], "Lunch expenses", "are capped at $", str(random.randint(15, 50))),
-            (["holiday", "vacation", "schedule"], "Vacation requests", "must be submitted", f"{random.randint(7, 30)} days in advance"),
-            (["travel", "flight", "hotel"], "Flight bookings", "must use airline code", f"{random.choice(['AA', 'DL', 'UA'])}{random.randint(100, 999)}"),
-            (["remote", "wfh", "home"], "Remote work", "is limited to", f"{random.randint(1, 4)} days per week"),
-            (["expense", "report", "receipt"], "Expense reports", "must be approved by", random.choice(["Finance", "HR", "your manager"])),
-            (["benefits", "health", "insurance"], "Health enrollment", "closes on", f"November {random.randint(1, 30)}"),
-            (["pet", "dog", "office"], "Office pets", "must weigh under", f"{random.randint(10, 50)} lbs"),
-            (["parking", "garage", "permit"], "Parking permits", "expire on", f"December {random.randint(1, 31)}"),
-            (["security", "badge", "access"], "Guest badges", "must be returned to", random.choice(["Reception", "Security", "Lobby"])),
-            (["hardware", "laptop", "monitor"], "Hardware requests", "take approximately", f"{random.randint(2, 8)} weeks to process")
+    def _generate_dynamic_noise_policies(self, count: int) -> list[dict]:
+        """Generates completely randomized corporate policies using built-in random."""
+        subjects = [
+            ("parking", "garage", "permit", "vehicle"),
+            ("lunch", "catering", "food", "cafeteria"),
+            ("travel", "flight", "hotel", "expenses"),
+            ("hardware", "laptop", "monitor", "keyboard"),
+            ("software", "license", "adobe", "installation"),
+            ("dress", "attire", "shoes", "casual"),
+            ("pets", "dog", "office", "animals")
         ]
         
-        policies = []
-        sampled_topics = random.sample(topics, min(count, len(topics)))
+        verbs = ["must be authorized by", "are strictly prohibited by", "require a 14-day notice to", "will be audited by", "should be reported to"]
+        departments = ["Human Resources", "Facilities Management", "Legal", "the VP of Operations", "IT Support", "Corporate Compliance"]
+        penalties = ["immediate termination.", "a formal warning.", "loss of privileges.", "a $50 fee.", "mandatory retraining."]
         
-        for keywords, subject, action, value in sampled_topics:
-            # Construct the randomized text
-            text = f"POLICY: {subject} Guidelines\n1. {subject} {action} {value}."
+        policies = []
+        # Pick 'count' random subjects without replacement
+        sampled_subjects = random.sample(subjects, min(count, len(subjects)))
+        
+        for word_tuple in sampled_subjects:
+            # The first word is the main subject
+            main_subject = word_tuple[0].capitalize()
             
-            # 50% chance to add a randomized secondary rule
-            if random.random() > 0.5:
-                text += f"\n2. Violations will be reported to {random.choice(['HR', 'Management', 'Facilities', 'Legal'])}."
+            # Build a highly randomized policy string
+            text = (
+                f"POLICY: {main_subject} Guidelines\n"
+                f"1. Requests regarding {random.choice(word_tuple)} {random.choice(verbs)} {random.choice(departments)}.\n"
+                f"2. Failure to comply will result in {random.choice(penalties)}"
+            )
             
-            policies.append({"keywords": keywords, "text": text})
+            policies.append({
+                "keywords": list(word_tuple),  # The fuzzy search will look for any of these
+                "text": text
+            })
             
         return policies
 
@@ -287,8 +457,8 @@ class SupportEnvironment(MCPEnvironment):
         first_names = ["James", "Mary", "Robert", "Patricia", "John", "Jennifer", "Michael", "Linda", "David", "Elizabeth", "William", "Barbara", "Richard", "Susan", "Joseph", "Jessica", "Thomas", "Sarah", "Charles", "Karen"]
         last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin"]
         
-        # Generate the pool
-        for i in range(1, num_dummy_users + 10):
+        # Generate the pool — needs at least 63 entries to guarantee keys[0..12] exist
+        for i in range(1, num_dummy_users + 16):
             random_days_ago = random.randint(3, 365)
             txn_date = (benchmark_date - timedelta(days=random_days_ago)).strftime("%Y-%m-%d")
             random_name = f"{random.choice(first_names)} {random.choice(last_names)}"
@@ -302,32 +472,64 @@ class SupportEnvironment(MCPEnvironment):
         # Procedurally map target tasks to random IDs from the pool
         keys = list(db.keys())
         random.shuffle(keys)
-        
-        self._target_easy = keys[0]
-        self._target_medium = keys[1]
-        self._target_hard = keys[2]
-        self._target_trap = keys[3]
-        self._target_multi = keys[4]
-        self._target_ultra = keys[5]
-        self._real_uid = keys[6]
-        self._auditor_uid = keys[7]
 
-        # Inject necessary task state conditions into those specific random IDs
-        db[self._target_easy]["status"] = "active"
+        # Tasks 1-6
+        self._target_easy   = keys[0]
+        self._target_medium = keys[1]
+        self._target_hard   = keys[2]
+        self._target_trap   = keys[3]
+        self._target_multi  = keys[4]
+        self._target_ultra  = keys[5]
+        self._real_uid      = keys[6]
+        self._auditor_uid   = keys[7]
+        # Tasks 7-9
+        self._target_vip          = keys[8]
+        self._target_breach       = keys[9]
+        self._target_mega         = keys[10]
+        self._breach_auditor_uid  = keys[11]
+        self._mega_compliance_uid = keys[12]
+
+        # Inject task state conditions — Tasks 1-6
+        db[self._target_easy]["status"]   = "active"
         db[self._target_medium]["status"] = "active"
-        db[self._target_hard]["status"] = "suspended"
-        db[self._target_trap]["status"] = "active"
-        db[self._target_multi]["status"] = "active"
-        
-        db[self._target_ultra]["status"] = "active"
+        db[self._target_hard]["status"]   = "suspended"
+        db[self._target_trap]["status"]   = "active"
+        db[self._target_multi]["status"]  = "active"
+
+        db[self._target_ultra]["status"]   = "active"
         db[self._target_ultra]["real_uid"] = self._real_uid
-        db[self._target_ultra]["last_txn"] = "2026-03-31" # recent txn triggers Aegis
-        
-        db[self._real_uid]["status"] = "active"
+        db[self._target_ultra]["last_txn"] = "2026-03-31"
+
+        db[self._real_uid]["status"]             = "active"
         db[self._real_uid]["compliance_auditor"] = self._auditor_uid
-        
-        db[self._auditor_uid]["status"] = "red-flag"
-        
+        db[self._auditor_uid]["status"]           = "red-flag"
+
+        # Inject task state conditions — Task 7 (VIP Payment)
+        db[self._target_vip]["status"]   = "active"
+        db[self._target_vip]["vip_flag"] = True
+
+        # Inject task state conditions — Task 8 (Security Breach)
+        db[self._target_breach]["status"]            = "active"
+        db[self._target_breach]["security_incident"] = True
+        db[self._target_breach]["security_auditor"]  = self._breach_auditor_uid
+        db[self._breach_auditor_uid]["status"]        = "active"  # → ENGINEERING
+
+        # Inject task state conditions — Task 9 (Mega Chain)
+        db[self._target_mega]["status"]             = "active"
+        db[self._target_mega]["compliance_hold"]    = True
+        db[self._target_mega]["shadow_ban"]         = True
+        db[self._target_mega]["compliance_auditor"] = self._mega_compliance_uid
+        db[self._target_mega]["x77_flag"]           = True
+        db[self._mega_compliance_uid]["status"]      = "red-flag"  # + both flags → ENGINEERING
+
+        # Inject CRM historical noise into all task target users
+        for uid in [
+            self._target_easy, self._target_medium, self._target_hard,
+            self._target_trap, self._target_multi, self._target_ultra,
+            self._target_vip, self._target_breach, self._target_mega,
+        ]:
+            db[uid]["crm_notes"] = random.sample(CRM_NOISE, k=random.randint(1, 2))
+
         return db
 
     def _record_tool_use(self, tool_name: str) -> None:
@@ -373,20 +575,35 @@ class SupportEnvironment(MCPEnvironment):
             if self._progress["read"]: task_r += 0.1
             if "checked_real_uid" in m: task_r += 0.1
             if "found_aegis_audit" in m: task_r += 0.1
+        elif diff == "vip":
+            if self._progress["read"]: task_r += 0.1
+            if target_user in u: task_r += 0.1
+            if "found_vip_policy" in m: task_r += 0.1
+        elif diff == "breach":
+            if self._progress["read"]: task_r += 0.1
+            if target_user in u: task_r += 0.1
+            if "found_breach_policy" in m and "checked_breach_auditor" in m: task_r += 0.1
+        elif diff == "mega":
+            if self._progress["read"]:                task_r += 0.05
+            if target_user in u:                      task_r += 0.05
+            if "found_compliance_resolution" in m:    task_r += 0.1
+            if "found_shadow_compliance" in m:        task_r += 0.1
             
         r = thought_r + task_r
 
         # Global Penalties
-        if self._progress["pinged_manager"]: r -= 0.3  # Strict penalty for giving up and pinging manager
-        if self._progress["distracted"]: r -= 0.2
-        if self._progress["out_of_order"]: r -= 0.1
-        if self._progress["god_query"]: r -= 0.2
-        if self._progress["teleported"]: r -= 0.3
+        if self._progress["pinged_manager"]: r -= 0.3
+        if self._progress["distracted"]:    r -= 0.2
+        if self._progress["out_of_order"]:  r -= 0.1
+        if self._progress["god_query"]:     r -= 0.2
+        if self._progress["teleported"]:    r -= 0.3
         if self._progress["lazy_resolution"]: r -= 0.2
-        
+        if self._progress["sop_violations"] > 0:
+            r -= self._progress["sop_violations"] * 0.05
+
         for tool in set(self._tools_used):
             if self._tools_used.count(tool) > 2: r -= (self._tools_used.count(tool) - 2) * 0.05
-            
+
         return max(0.0, r)
 
     def _finalize_episode(self, action_type: str, department: str | None = None) -> None:
@@ -422,6 +639,9 @@ class SupportEnvironment(MCPEnvironment):
             elif task_diff == "trap" and self._progress["read"] and "found_refund_policy" in m and "found_account_policy" in m: valid_progression = True
             elif task_diff == "multi_hop" and self._progress["read"] and "found_x77_policy" in m and "found_shadow_policy" in m: valid_progression = True
             elif task_diff == "ultra" and self._progress["read"] and "checked_real_uid" in m and "found_aegis_audit" in m: valid_progression = True
+            elif task_diff == "vip" and self._progress["read"] and target_user in u and "found_vip_policy" in m: valid_progression = True
+            elif task_diff == "breach" and self._progress["read"] and target_user in u and "found_breach_policy" in m and "checked_breach_auditor" in m: valid_progression = True
+            elif task_diff == "mega" and self._progress["read"] and target_user in u and "found_compliance_resolution" in m and "found_shadow_compliance" in m and "checked_mega_auditor" in m: valid_progression = True
             
             if valid_progression:
                 bonus = 0.3
@@ -447,10 +667,14 @@ class SupportEnvironment(MCPEnvironment):
         self._db = self._generate_dynamic_database()
         
         # Procedurally generate 3-5 entirely random noise policies for this episode
-        self._active_noise_policies = self._generate_random_noise_policies(random.randint(3, 5))
+        self._active_noise_policies = self._generate_dynamic_noise_policies(random.randint(3, 5))
         
         forced_idx = kwargs.get("task_idx")
-        if forced_idx is not None: self._task_index = int(forced_idx)
+        forced_diff = kwargs.get("difficulty")
+        if forced_diff and forced_diff in _DIFFICULTY_MAP:
+            self._task_index = _DIFFICULTY_MAP[forced_diff]
+        elif forced_idx is not None:
+            self._task_index = int(forced_idx)
 
         # Generate Procedural Ticket Text variations
         easy_texts = [f"Reset password for {self._target_easy}.", f"User {self._target_easy} is locked out, needs password reset.", f"Forgot password on account {self._target_easy}."]
@@ -460,14 +684,22 @@ class SupportEnvironment(MCPEnvironment):
         multi_texts = [f"Error X77 for {self._target_multi}.", f"Payment failed with X77 for {self._target_multi}.", f"Getting error code X77 on checkout, user {self._target_multi}."]
         ultra_texts = [f"Change email for {self._target_ultra}. URGENT.", f"Urgent email update requested for {self._target_ultra}.", f"Update email address for account {self._target_ultra} immediately."]
 
+        vip_texts   = [f"Update payment method for {self._target_vip}.", f"Payment info change request for {self._target_vip}.", f"{self._target_vip} needs to update card on file."]
+        breach_texts = [f"Unauthorized login attempt on {self._target_breach}.", f"{self._target_breach} reports suspicious account access.", f"Possible breach detected on account {self._target_breach}."]
+        mega_texts  = [f"Account {self._target_mega} has a payment error and compliance issue. URGENT.", f"{self._target_mega}: X77 error, compliance hold active.", f"Multiple issues on {self._target_mega}: payment failure and compliance flag."]
+
         tasks = [
-            {"difficulty": "easy", "required_steps": 3, "target_user": self._target_easy, "ticket_text": random.choice(easy_texts), "correct_action": "resolve", "correct_dept": ""},
-            {"difficulty": "medium", "required_steps": 4, "target_user": self._target_medium, "ticket_text": random.choice(medium_texts), "correct_action": "resolve", "correct_dept": ""},
-            {"difficulty": "hard", "required_steps": 4, "target_user": self._target_hard, "ticket_text": random.choice(hard_texts), "correct_action": "escalate", "correct_dept": "security"},
-            {"difficulty": "trap", "required_steps": 5, "target_user": self._target_trap, "ticket_text": random.choice(trap_texts), "correct_action": "escalate", "correct_dept": "billing"},
-            {"difficulty": "multi_hop", "required_steps": 5, "target_user": self._target_multi, "ticket_text": random.choice(multi_texts), "correct_action": "escalate", "correct_dept": "security"},
-            {"difficulty": "ultra", "required_steps": 8, "target_user": self._target_ultra, "ticket_text": random.choice(ultra_texts), "correct_action": "escalate", "correct_dept": "security"}
+            {"difficulty": "easy",      "required_steps": 4,  "target_user": self._target_easy,   "ticket_text": random.choice(easy_texts),   "correct_action": "resolve",   "correct_dept": ""},
+            {"difficulty": "medium",    "required_steps": 4,  "target_user": self._target_medium, "ticket_text": random.choice(medium_texts), "correct_action": "resolve",   "correct_dept": ""},
+            {"difficulty": "hard",      "required_steps": 4,  "target_user": self._target_hard,   "ticket_text": random.choice(hard_texts),   "correct_action": "escalate",  "correct_dept": "security"},
+            {"difficulty": "trap",      "required_steps": 4,  "target_user": self._target_trap,   "ticket_text": random.choice(trap_texts),   "correct_action": "escalate",  "correct_dept": "billing"},
+            {"difficulty": "multi_hop", "required_steps": 5,  "target_user": self._target_multi,  "ticket_text": random.choice(multi_texts),  "correct_action": "escalate",  "correct_dept": "security"},
+            {"difficulty": "ultra",     "required_steps": 8,  "target_user": self._target_ultra,  "ticket_text": random.choice(ultra_texts),  "correct_action": "escalate",  "correct_dept": "security"},
+            {"difficulty": "vip",       "required_steps": 5,  "target_user": self._target_vip,    "ticket_text": random.choice(vip_texts),    "correct_action": "escalate",  "correct_dept": "billing"},
+            {"difficulty": "breach",    "required_steps": 6,  "target_user": self._target_breach, "ticket_text": random.choice(breach_texts), "correct_action": "escalate",  "correct_dept": "engineering"},
+            {"difficulty": "mega",      "required_steps": 10, "target_user": self._target_mega,   "ticket_text": random.choice(mega_texts),   "correct_action": "escalate",  "correct_dept": "engineering"},
         ]
+
         
         self._current_task = tasks[self._task_index % len(tasks)]
         self._task_index += 1
@@ -476,9 +708,10 @@ class SupportEnvironment(MCPEnvironment):
         self._tools_used = []
         
         self._progress = {
-            "read": False, "searched_kb": False, "checked_db": False, 
-            "distracted": False, "pinged_manager": False, "out_of_order": False, 
-            "god_query": False, "teleported": False, "lazy_resolution": False, 
+            "read": False, "searched_kb": False, "checked_db": False,
+            "distracted": False, "pinged_manager": False, "out_of_order": False,
+            "god_query": False, "teleported": False, "lazy_resolution": False,
+            "sop_violations": 0,
             "milestones": set(), "queried_users": set(),
             # Tracking Instruction Following
             "thought_identified_request": False,

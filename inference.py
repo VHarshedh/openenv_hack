@@ -32,8 +32,11 @@ LOCAL_IMAGE_NAME = _strip(os.getenv("LOCAL_IMAGE_NAME", "support_env_image"))
 # Optional wall-clock budget for the whole run
 INFERENCE_MAX_SECONDS = int(os.getenv("INFERENCE_MAX_SECONDS", "1200"))
 
-NUM_TASKS = 6
+NUM_TASKS = 9
 MAX_STEPS_PER_TASK = 15
+
+MAX_CONSECUTIVE_FAILS = 2  # lock gate after this many fails in a row
+MAX_SKIP_AFTER_LOCK   = 2  # when locked, agent can still attempt next N tasks
 
 
 def _step_delay_seconds() -> int:
@@ -123,9 +126,23 @@ async def main():
             "tasks": []
         }
 
+        # Dynamic difficulty gating — 2-consecutive-fail streak system
+        consecutive_fails = 0
+        locked_at: int | None = None
+
         for task_idx in range(NUM_TASKS):
             if time_budget_exceeded():
                 break
+
+            # Difficulty gate: skip tasks beyond locked window
+            if locked_at is not None and task_idx > locked_at + MAX_SKIP_AFTER_LOCK:
+                task_name = f"task_{task_idx + 1}"
+                log_info(f"\n⏭ Skipping task {task_idx + 1} — difficulty gate active (locked after task {locked_at + 1}).")
+                print(f"[START] task={task_name} env=support_env model={MODEL_NAME}", flush=True)
+                print(f"[END] success=false steps=0 score=0.00 rewards=0.00", flush=True)
+                total_rewards.append(0.0)
+                run_logs["tasks"].append({"task_idx": task_idx, "difficulty": "skipped", "steps": [], "final_reward": 0.0})
+                continue
 
             log_info(f"\n{'='*60}\n   TASK {task_idx + 1}\n{'='*60}")
 
@@ -306,11 +323,20 @@ async def main():
                     rewards_str = "0.00"
                 else:
                     rewards_str = ",".join([f"{r:.2f}" for r in rewards_history])
-                print(f"[END] success={success_str} steps={step_count} rewards={rewards_str}", flush=True)
+                print(f"[END] success={success_str} steps={step_count} score={final_reward:.2f} rewards={rewards_str}", flush=True)
 
             task_log["final_reward"] = final_reward
             run_logs["tasks"].append(task_log)
             total_rewards.append(final_reward)
+
+            # Update consecutive-fail streak gate
+            if final_reward < 0.3:
+                consecutive_fails += 1
+                if consecutive_fails >= MAX_CONSECUTIVE_FAILS and locked_at is None:
+                    locked_at = task_idx
+                    log_info(f"\n🔒 Difficulty gate locked after {MAX_CONSECUTIVE_FAILS} consecutive fails (at task {task_idx + 1}).")
+            else:
+                consecutive_fails = 0  # reset streak on any pass
 
         if not total_rewards:
             log_info("\n❌ No tasks completed.")

@@ -40,6 +40,16 @@ app = create_app(
     SupportEnvironment, CallToolAction, CallToolObservation, env_name="support_env"
 )
 
+# Explicit /health endpoint — guarantees 200 OK for Docker HEALTHCHECK and
+# the Phase 1 automated validator even if create_app's auto-route is not
+# the first route resolved by the ASGI router.
+from fastapi import Response  # noqa: E402
+
+@app.get("/health", tags=["health"])
+async def health_check() -> dict:
+    """Liveness probe: returns 200 OK with a healthy status payload."""
+    return {"status": "healthy"}
+
 
 def main():
     """
