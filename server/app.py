@@ -40,6 +40,31 @@ app = create_app(
     SupportEnvironment, CallToolAction, CallToolObservation, env_name="support_env"
 )
 
+from fastapi import Request
+import json
+try:
+    from server.support_env_environment import _current_episode_id
+except ImportError:
+    from .support_env_environment import _current_episode_id
+
+@app.middleware("http")
+async def episode_id_extractor(request: Request, call_next):
+    if request.url.path.endswith("/step") and request.method == "POST":
+        body = await request.body()
+        try:
+            data = json.loads(body)
+            ep_id = data.get("episode_id")
+            if ep_id:
+                _current_episode_id.set(ep_id)
+        except Exception:
+            pass
+
+        async def receive():
+            return {"type": "http.request", "body": body}
+        request._receive = receive
+
+    return await call_next(request)
+
 # Explicit /health endpoint — guarantees 200 OK for Docker HEALTHCHECK and
 # the Phase 1 automated validator even if create_app's auto-route is not
 # the first route resolved by the ASGI router.

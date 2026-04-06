@@ -8,4 +8,6 @@ Logs
 *.log
 Inference Results
 results/
+result/
 Error.txt
+debug_ws.py

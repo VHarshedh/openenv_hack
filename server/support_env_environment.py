@@ -22,7 +22,8 @@ from openenv.core.env_server.types import Action, Observation, State
 from fastmcp import FastMCP
 
 # Context variable to dynamically track the active environment instance during a tool call
-_active_env = contextvars.ContextVar('_active_env')
+_active_env: contextvars.ContextVar[Optional['SupportEnvironment']] = contextvars.ContextVar('_active_env', default=None)
+_current_episode_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar('_current_episode_id', default=None)
 
 KNOWLEDGE_BASE = {
     # Core Policies — Tasks 1-6
@@ -32,6 +33,8 @@ KNOWLEDGE_BASE = {
     "refund policy account deletion conflict": "POLICY: Conflict\n1. Refund + Deletion -> BILLING.",
     "error code x77 payment failure":         "POLICY: X77\n1. If 'active', search KB for 'Shadow Ban Protocol'.",
     "shadow ban protocol security":           "POLICY: Shadow Ban\n1. ACTION: Escalate to SECURITY.",
+    "gdpr deletion request":          "POLICY: GDPR Deletion\n1. If 'gdpr_flag' is active, standard deletion is blocked.\n2. Search KB for 'Privacy Officer'.",
+    "privacy officer routing":        "POLICY: Privacy Officer\n1. Verify status of the assigned Privacy Officer UID.\n2. If status is 'red-flag', escalate to SECURITY immediately.",
     "email change request":                   "DEPRECATED POLICY (v1.2): For email changes, see 'Project Aegis' Internal Memo for latest security requirements.",
     "project aegis memo":                     "POLICY: Aegis Security\n1. If account has 'Real UID' mapping, you MUST verify the 'Compliance Auditor'.\n2. IF ticket date is within 48 hours of last transaction: Escalation is MANDATORY.\n3. Search KB for 'Aegis Audit' for final routing.",
     "aegis audit routing":                    "POLICY: Aegis Audit\n1. If Compliance Auditor status is NOT 'green', escalate to SECURITY.\n2. If Compliance Auditor is 'green' but account is 'flagged', escalate to BILLING.",
@@ -63,7 +66,7 @@ def _tokenize(text: str) -> set:
 _CANONICAL_TRIGGERS: frozenset = frozenset({
     "password", "refund", "delete", "account", "500",
     "suspended", "x77", "email", "aegis", "audit", "shadow",
-    "vip", "breach", "compliance",
+    "vip", "breach", "compliance", "gdpr", "officer",
 })
 
 # KB routing table: synonym-expanded, word-boundary safe.
@@ -111,6 +114,12 @@ KB_ROUTES: list = [
     {"synonyms": {"breach","incident"},
      "milestone": "found_breach_policy", "key": "data breach protocol",
      "guard": lambda t: bool(t & {"breach","incident"})},
+    {"synonyms": {"gdpr", "eu", "privacy", "data"},
+     "milestone": "found_gdpr_policy", "key": "gdpr deletion request",
+     "guard": lambda t: "gdpr" in t or "data" in t},
+    {"synonyms": {"officer", "privacy", "routing"},
+     "milestone": "found_privacy_officer", "key": "privacy officer routing",
+     "guard": lambda t: "officer" in t},
     # --- Task 9 ---
     {"synonyms": {"compliance","hold","frozen"},
      "milestone": "found_compliance_hold", "key": "compliance hold policy",
@@ -133,7 +142,7 @@ KB_ROUTES: list = [
 # Maps difficulty string to task index (used by reset() difficulty kwarg)
 _DIFFICULTY_MAP: dict = {
     "easy": 0, "medium": 1, "hard": 2, "trap": 3,
-    "multi_hop": 4, "ultra": 5, "vip": 6, "breach": 7, "mega": 8,
+    "vip": 4, "multi_hop": 5, "breach": 6, "privacy": 7, "ultra": 8, "mega": 9,
 }
 
 # Historical CRM noise injected into each task user's DB record on reset()
@@ -152,6 +161,7 @@ class SupportEnvironment(MCPEnvironment):
     
     # Class-level reference to recover state if HTTP session routing drops the episode_id
     _latest_instance = None
+    _instances: dict[str, 'SupportEnvironment'] = {}
 
     def __init__(self):
         # Convert state back to instance variables for pure concurrency
@@ -176,6 +186,8 @@ class SupportEnvironment(MCPEnvironment):
         self._target_vip = ""
         self._target_breach = ""
         self._target_mega = ""
+        self._target_privacy = ""
+        self._privacy_officer_uid = ""
         self._breach_auditor_uid = ""
         self._mega_compliance_uid = ""
 
@@ -189,6 +201,7 @@ class SupportEnvironment(MCPEnvironment):
             "god_query": False,
             "teleported": False,
             "lazy_resolution": False,
+            "sla_breached": False,
             "sop_violations": 0,
             "milestones": set(),
             "queried_users": set(),
@@ -204,17 +217,24 @@ class SupportEnvironment(MCPEnvironment):
         @mcp.tool
         def read_ticket(thought: str) -> str:
             """Read the ticket."""
-            env = _active_env.get()
-            env._validate_thought(thought)
+            env = _active_env.get() or SupportEnvironment._latest_instance
+            env._state.step_count += 1
+            env._validate_thought(thought, "read_ticket")
             env._record_tool_use("read_ticket")
             env._progress["read"] = True
-            return env._current_task.get("ticket_text", "Error: Ticket missing.")
+            
+            ticket_text = env._current_task.get("ticket_text", "Error: Ticket missing.")
+            optimal_steps = env._current_task.get("required_steps", 4)
+            sla_limit = optimal_steps + 3
+            
+            return f"{ticket_text}\n\n[METADATA: SLA Limit = {sla_limit} actions. Efficiency penalties apply if exceeded.]"
 
         @mcp.tool
         def search_knowledge_base(thought: str, query: str) -> str:
-            """Search policies."""
-            env = _active_env.get()
-            env._validate_thought(thought)
+            """Search the standard operating procedure knowledge base."""
+            env = _active_env.get() or SupportEnvironment._latest_instance
+            env._state.step_count += 1
+            env._validate_thought(thought, "search_knowledge_base")
             env._record_tool_use("search_knowledge_base")
             if not env._progress["read"]: env._progress["out_of_order"] = True
 
@@ -249,13 +269,22 @@ class SupportEnvironment(MCPEnvironment):
             if results and env._progress["read"]:
                 env._progress["searched_kb"] = True
 
-            return "\n\n".join(results) if results else "No specific policies found."
+            res = "\n\n".join(results) if results else "No specific policies found."
+            
+            # [NEW] SLA Breach Warning
+            optimal_steps = env._current_task.get("required_steps", 4)
+            sla_limit = optimal_steps + 3
+            if env._state.step_count > sla_limit:
+                res += f"\n\n⚠️ SYSTEM_WARNING: SLA Breached ({env._state.step_count}/{sla_limit} steps). Efficiency penalty of -0.05 active."
+                
+            return res
 
         @mcp.tool
         def check_billing(thought: str, user_id: str) -> str:
             """Check account status."""
-            env = _active_env.get()
-            env._validate_thought(thought)
+            env = _active_env.get() or SupportEnvironment._latest_instance
+            env._state.step_count += 1
+            env._validate_thought(thought, "check_billing")
             env._record_tool_use("check_billing")
             if not env._progress["read"]: env._progress["out_of_order"] = True
 
@@ -269,7 +298,11 @@ class SupportEnvironment(MCPEnvironment):
                 env._progress["teleported"] = True
             # Anti-Cheat: Teleportation — Tasks 7-9
             if user_id == env._breach_auditor_uid and "found_breach_policy" not in env._progress["milestones"]:
-                env._progress["teleported"] = True
+                if env._target_breach in env._progress["queried_users"]:
+                    env._progress["teleported"] = True
+            if user_id == env._privacy_officer_uid and "found_gdpr_policy" not in env._progress["milestones"]:
+                if env._target_privacy in env._progress["queried_users"]:
+                    env._progress["teleported"] = True
             if user_id == env._mega_compliance_uid and env._target_mega not in env._progress["queried_users"]:
                 env._progress["teleported"] = True
 
@@ -284,6 +317,7 @@ class SupportEnvironment(MCPEnvironment):
                 if user_id == env._auditor_uid:       env._progress["milestones"].add("checked_compliance_auditor")
                 # Task 8 milestones
                 if user_id == env._breach_auditor_uid: env._progress["milestones"].add("checked_breach_auditor")
+                if user_id == env._privacy_officer_uid: env._progress["milestones"].add("checked_privacy_officer")
                 # Task 9 milestones
                 if user_id == env._mega_compliance_uid: env._progress["milestones"].add("checked_mega_auditor")
 
@@ -293,27 +327,38 @@ class SupportEnvironment(MCPEnvironment):
             if "security_auditor" in user:      res += f"\nSecurity Auditor: {user['security_auditor']}"
             if user.get("vip_flag"):            res += "\nAccount Type: VIP"
             if user.get("security_incident"):   res += "\nAlert: Security Incident Reported"
+            if user.get("gdpr_flag"):           res += "\nFlag: GDPR Privacy Hold Active"
+            if "privacy_officer" in user:       res += f"\nPrivacy Officer: {user['privacy_officer']}"
             if user.get("compliance_hold"):     res += "\nFlag: Compliance Hold Active"
             if user.get("shadow_ban"):          res += "\nFlag: Shadow Ban Active"
             if user.get("x77_flag"):            res += "\nError: X77 Payment Failure Detected"
             if "crm_notes" in user:
                 res += f"\nCRM History: {' | '.join(user['crm_notes'])}"
+
+            # [NEW] SLA Breach Warning
+            optimal_steps = env._current_task.get("required_steps", 4)
+            sla_limit = optimal_steps + 3
+            if env._state.step_count > sla_limit:
+                res += f"\n\n⚠️ SYSTEM_WARNING: SLA Breached ({env._state.step_count}/{sla_limit} steps). Efficiency penalty of -0.05 active."
+                
             return res
             
         @mcp.tool
         def ping_human_manager(thought: str, reason: str) -> str:
             """Ask a manager for help."""
-            env = _active_env.get()
-            env._validate_thought(thought)
+            env = _active_env.get() or SupportEnvironment._latest_instance
+            env._state.step_count += 1
+            env._validate_thought(thought, "ping_human_manager")
             env._record_tool_use("ping_human_manager")
             env._progress["pinged_manager"] = True
             return "SYSTEM AUTO-REPLY: All managers are currently offline. Please follow standard SOP."
 
         @mcp.tool
         def escalate_ticket(thought: str, department: str) -> str:
-            """Escalate to billing, engineering, or security."""
-            env = _active_env.get()
-            env._validate_thought(thought)
+            """Escalate to another department (billing, security, engineering)."""
+            env = _active_env.get() or SupportEnvironment._latest_instance
+            env._state.step_count += 1
+            env._validate_thought(thought, "escalate_ticket")
             # Process Supervision: SOP soft-block (easy tasks exempt — no DB check required)
             diff = env._current_task.get("difficulty", "")
             if not env._progress["checked_db"] and diff != "easy":
@@ -331,9 +376,10 @@ class SupportEnvironment(MCPEnvironment):
 
         @mcp.tool
         def resolve_ticket(thought: str, message: str) -> str:
-            """Resolve ticket."""
-            env = _active_env.get()
-            env._validate_thought(thought)
+            """Resolve the issue and message the user."""
+            env = _active_env.get() or SupportEnvironment._latest_instance
+            env._state.step_count += 1
+            env._validate_thought(thought, "resolve_ticket")
 
             # Process Supervision: must read ticket first
             if not env._progress["read"]:
@@ -353,8 +399,9 @@ class SupportEnvironment(MCPEnvironment):
             if re.search(r"\[[^\]]+\]", message) or re.search(r"<[^>]+>", message):
                 env._progress["lazy_resolution"] = True
 
-            # Anti-Cheat 2: Name/ID grounding check (easy + medium only).
-            if diff in ("easy", "medium"):
+            # Anti-Cheat 2: Name/ID grounding check (only if the agent has queried the DB,
+            # so they had the opportunity to discover the name).
+            if diff in ("easy", "medium") and env._progress.get("checked_db", False):
                 target_user = env._current_task.get("target_user", "")
                 db_record = env._db.get(target_user, {})
                 user_name = db_record.get("name", "").lower()
@@ -380,10 +427,10 @@ class SupportEnvironment(MCPEnvironment):
         if not hasattr(self, "_mode_tools"):
             self._mode_tools = []
 
-    def _validate_thought(self, thought: str):
+    def _validate_thought(self, thought: str, tool_name: str | None = None):
         """Scans the thought parameter contextually to prove step-by-step reasoning."""
-        if not thought or len(thought.strip()) < 10: 
-            self._progress["distracted"] = True
+        if not thought:
+            self._progress["thought_missing"] = True
             return
             
         thought_lower = thought.lower()
@@ -395,16 +442,16 @@ class SupportEnvironment(MCPEnvironment):
         ]):
             self._progress["thought_identified_request"] = True
             
-        # Step 2: Note specific states (Context-Aware: Only valid if they have actually queried the DB)
-        if self._progress.get("checked_db", False):
+        # Step 2: Note specific states (Context-Aware: Only valid if they have actually queried the DB OR are querying now)
+        if self._progress.get("checked_db", False) or tool_name == "check_billing":
             if any(w in thought_lower for w in [
                 "status", "active", "suspended", "state", "red-flag",
                 "banned", "disabled", "status is", "found in db"
             ]):
                 self._progress["thought_noted_state"] = True
                 
-        # Step 3/4: Cross-reference & Verify against KB (Context-Aware: Only valid if they searched KB)
-        if self._progress.get("searched_kb", False):
+        # Step 3/4: Cross-reference & Verify against KB (Context-Aware: Only valid if they searched KB OR are searching now)
+        if self._progress.get("searched_kb", False) or tool_name == "search_knowledge_base":
             if any(w in thought_lower for w in [
                 "policy", "knowledge base", "kb", "escalation", "verify", "rule", "protocol",
                 "guidelines", "rules", "instructions", "sop", "standard operating procedure"
@@ -488,6 +535,8 @@ class SupportEnvironment(MCPEnvironment):
         self._target_mega         = keys[10]
         self._breach_auditor_uid  = keys[11]
         self._mega_compliance_uid = keys[12]
+        self._target_privacy      = keys[13]
+        self._privacy_officer_uid = keys[14]
 
         # Inject task state conditions — Tasks 1-6
         db[self._target_easy]["status"]   = "active"
@@ -495,6 +544,7 @@ class SupportEnvironment(MCPEnvironment):
         db[self._target_hard]["status"]   = "suspended"
         db[self._target_trap]["status"]   = "active"
         db[self._target_multi]["status"]  = "active"
+        db[self._target_multi]["x77_flag"] = True
 
         db[self._target_ultra]["status"]   = "active"
         db[self._target_ultra]["real_uid"] = self._real_uid
@@ -514,6 +564,12 @@ class SupportEnvironment(MCPEnvironment):
         db[self._target_breach]["security_auditor"]  = self._breach_auditor_uid
         db[self._breach_auditor_uid]["status"]        = "active"  # → ENGINEERING
 
+        # Inject task state conditions — GDPR Privacy Hold
+        db[self._target_privacy]["status"] = "active"
+        db[self._target_privacy]["gdpr_flag"] = True
+        db[self._target_privacy]["privacy_officer"] = self._privacy_officer_uid
+        db[self._privacy_officer_uid]["status"] = "red-flag"
+
         # Inject task state conditions — Task 9 (Mega Chain)
         db[self._target_mega]["status"]             = "active"
         db[self._target_mega]["compliance_hold"]    = True
@@ -527,6 +583,7 @@ class SupportEnvironment(MCPEnvironment):
             self._target_easy, self._target_medium, self._target_hard,
             self._target_trap, self._target_multi, self._target_ultra,
             self._target_vip, self._target_breach, self._target_mega,
+            self._target_privacy,
         ]:
             db[uid]["crm_notes"] = random.sample(CRM_NOISE, k=random.randint(1, 2))
 
@@ -543,7 +600,12 @@ class SupportEnvironment(MCPEnvironment):
         thought_r = 0.0
         if self._progress["thought_identified_request"]: thought_r += 0.1
         if self._progress["thought_noted_state"]: thought_r += 0.1
-        if self._progress["thought_verified_kb"]: thought_r += 0.2
+        # thought_verified_kb: award if agent demonstrated KB reasoning AND actually found a policy
+        # (searched_kb set by successful route match + milestones non-empty = no free exploit)
+        if self._progress.get("searched_kb") and bool(self._progress["milestones"]):
+            thought_r += 0.2
+        elif self._progress["thought_verified_kb"]:
+            thought_r += 0.2
         
         # 2. Task Accuracy/Progression Reward (Max 0.3 here, leaving 0.3 for the final action)
         task_r = 0.0
@@ -564,17 +626,22 @@ class SupportEnvironment(MCPEnvironment):
             if target_user in u: task_r += 0.1
             if "found_500_policy" in m: task_r += 0.1
         elif diff == "trap":
-            if self._progress["read"]: task_r += 0.1
+            if self._progress["read"]: task_r += 0.05
+            if target_user in u: task_r += 0.05
             if "found_refund_policy" in m: task_r += 0.1
             if "found_account_policy" in m: task_r += 0.1
         elif diff == "multi_hop":
-            if self._progress["read"]: task_r += 0.1
+            if self._progress["read"]: task_r += 0.05
+            if target_user in u: task_r += 0.05
             if "found_x77_policy" in m: task_r += 0.1
             if "found_shadow_policy" in m: task_r += 0.1
         elif diff == "ultra":
-            if self._progress["read"]: task_r += 0.1
-            if "checked_real_uid" in m: task_r += 0.1
-            if "found_aegis_audit" in m: task_r += 0.1
+            if self._progress["read"]: task_r += 0.05
+            if target_user in u: task_r += 0.05
+            if "found_aegis_memo" in m: task_r += 0.05
+            if "checked_real_uid" in m: task_r += 0.05
+            if "found_aegis_audit" in m: task_r += 0.05
+            if "checked_compliance_auditor" in m: task_r += 0.05
         elif diff == "vip":
             if self._progress["read"]: task_r += 0.1
             if target_user in u: task_r += 0.1
@@ -583,6 +650,11 @@ class SupportEnvironment(MCPEnvironment):
             if self._progress["read"]: task_r += 0.1
             if target_user in u: task_r += 0.1
             if "found_breach_policy" in m and "checked_breach_auditor" in m: task_r += 0.1
+        elif diff == "privacy":
+            if self._progress["read"]: task_r += 0.05
+            if target_user in u: task_r += 0.05
+            if "found_gdpr_policy" in m: task_r += 0.1
+            if "checked_privacy_officer" in m: task_r += 0.1
         elif diff == "mega":
             if self._progress["read"]:                task_r += 0.05
             if target_user in u:                      task_r += 0.05
@@ -592,6 +664,7 @@ class SupportEnvironment(MCPEnvironment):
         r = thought_r + task_r
 
         # Global Penalties
+        if self._progress.get("thought_missing"): r -= 0.1
         if self._progress["pinged_manager"]: r -= 0.3
         if self._progress["distracted"]:    r -= 0.2
         if self._progress["out_of_order"]:  r -= 0.1
@@ -600,6 +673,15 @@ class SupportEnvironment(MCPEnvironment):
         if self._progress["lazy_resolution"]: r -= 0.2
         if self._progress["sop_violations"] > 0:
             r -= self._progress["sop_violations"] * 0.05
+
+        # [NEW] SLA Draining Timer (Padded)
+        optimal_steps = self._current_task.get("required_steps", 4) if self._current_task else 4
+        sla_limit = optimal_steps + 3
+        
+        if self._state.step_count > sla_limit:
+            self._progress["sla_breached"] = True
+            # Drain 0.05 for every step past the padded SLA
+            r -= ((self._state.step_count - sla_limit) * 0.05)
 
         for tool in set(self._tools_used):
             if self._tools_used.count(tool) > 2: r -= (self._tools_used.count(tool) - 2) * 0.05
@@ -636,11 +718,12 @@ class SupportEnvironment(MCPEnvironment):
             if task_diff == "easy" and self._progress["read"] and "found_password_policy" in m: valid_progression = True
             elif task_diff == "medium" and self._progress["read"] and target_user in u and "found_refund_policy" in m: valid_progression = True
             elif task_diff == "hard" and self._progress["read"] and target_user in u and "found_500_policy" in m: valid_progression = True
-            elif task_diff == "trap" and self._progress["read"] and "found_refund_policy" in m and "found_account_policy" in m: valid_progression = True
-            elif task_diff == "multi_hop" and self._progress["read"] and "found_x77_policy" in m and "found_shadow_policy" in m: valid_progression = True
-            elif task_diff == "ultra" and self._progress["read"] and "checked_real_uid" in m and "found_aegis_audit" in m: valid_progression = True
+            elif task_diff == "trap" and self._progress["read"] and target_user in u and "found_refund_policy" in m and "found_account_policy" in m: valid_progression = True
+            elif task_diff == "multi_hop" and self._progress["read"] and target_user in u and "found_x77_policy" in m and "found_shadow_policy" in m: valid_progression = True
+            elif task_diff == "ultra" and self._progress["read"] and target_user in u and "found_aegis_memo" in m and "checked_real_uid" in m and "found_aegis_audit" in m and "checked_compliance_auditor" in m: valid_progression = True
             elif task_diff == "vip" and self._progress["read"] and target_user in u and "found_vip_policy" in m: valid_progression = True
             elif task_diff == "breach" and self._progress["read"] and target_user in u and "found_breach_policy" in m and "checked_breach_auditor" in m: valid_progression = True
+            elif task_diff == "privacy" and self._progress["read"] and target_user in u and "found_gdpr_policy" in m and "checked_privacy_officer" in m: valid_progression = True
             elif task_diff == "mega" and self._progress["read"] and target_user in u and "found_compliance_resolution" in m and "found_shadow_compliance" in m and "checked_mega_auditor" in m: valid_progression = True
             
             if valid_progression:
@@ -655,11 +738,6 @@ class SupportEnvironment(MCPEnvironment):
             if (has_ref != has_acc) and (has_ref or has_acc):
                 r -= 0.2
 
-        # Step Count Efficiency Penalty
-        req = self._current_task.get("required_steps", 4) if self._current_task else 4
-        if self._state.step_count > req:
-            r -= ((self._state.step_count - req) * 0.05)
-
         # Strict Clamping ensures the reward mathematically cannot exit 0.0 - 1.0 bounds
         self._trajectory_reward = max(0.0, min(1.0, r))
 
@@ -669,12 +747,17 @@ class SupportEnvironment(MCPEnvironment):
         # Procedurally generate 3-5 entirely random noise policies for this episode
         self._active_noise_policies = self._generate_dynamic_noise_policies(random.randint(3, 5))
         
-        forced_idx = kwargs.get("task_idx")
-        forced_diff = kwargs.get("difficulty")
+        options = kwargs.get("options", {})
+        forced_idx = options.get("task_idx")
+        forced_diff = options.get("difficulty")
         if forced_diff and forced_diff in _DIFFICULTY_MAP:
             self._task_index = _DIFFICULTY_MAP[forced_diff]
         elif forced_idx is not None:
             self._task_index = int(forced_idx)
+        elif kwargs.get("task_idx") is not None:
+             self._task_index = int(kwargs.get("task_idx"))
+        elif kwargs.get("difficulty") is not None:
+             self._task_index = _DIFFICULTY_MAP[kwargs.get("difficulty")]
 
         # Generate Procedural Ticket Text variations
         easy_texts = [f"Reset password for {self._target_easy}.", f"User {self._target_easy} is locked out, needs password reset.", f"Forgot password on account {self._target_easy}."]
@@ -689,14 +772,15 @@ class SupportEnvironment(MCPEnvironment):
         mega_texts  = [f"Account {self._target_mega} has a payment error and compliance issue. URGENT.", f"{self._target_mega}: X77 error, compliance hold active.", f"Multiple issues on {self._target_mega}: payment failure and compliance flag."]
 
         tasks = [
-            {"difficulty": "easy",      "required_steps": 4,  "target_user": self._target_easy,   "ticket_text": random.choice(easy_texts),   "correct_action": "resolve",   "correct_dept": ""},
+            {"difficulty": "easy",      "required_steps": 3,  "target_user": self._target_easy,   "ticket_text": random.choice(easy_texts),   "correct_action": "resolve",   "correct_dept": ""},
             {"difficulty": "medium",    "required_steps": 4,  "target_user": self._target_medium, "ticket_text": random.choice(medium_texts), "correct_action": "resolve",   "correct_dept": ""},
             {"difficulty": "hard",      "required_steps": 4,  "target_user": self._target_hard,   "ticket_text": random.choice(hard_texts),   "correct_action": "escalate",  "correct_dept": "security"},
-            {"difficulty": "trap",      "required_steps": 4,  "target_user": self._target_trap,   "ticket_text": random.choice(trap_texts),   "correct_action": "escalate",  "correct_dept": "billing"},
-            {"difficulty": "multi_hop", "required_steps": 5,  "target_user": self._target_multi,  "ticket_text": random.choice(multi_texts),  "correct_action": "escalate",  "correct_dept": "security"},
-            {"difficulty": "ultra",     "required_steps": 8,  "target_user": self._target_ultra,  "ticket_text": random.choice(ultra_texts),  "correct_action": "escalate",  "correct_dept": "security"},
+            {"difficulty": "trap",      "required_steps": 5,  "target_user": self._target_trap,   "ticket_text": random.choice(trap_texts),   "correct_action": "escalate",  "correct_dept": "billing"},
             {"difficulty": "vip",       "required_steps": 5,  "target_user": self._target_vip,    "ticket_text": random.choice(vip_texts),    "correct_action": "escalate",  "correct_dept": "billing"},
+            {"difficulty": "multi_hop", "required_steps": 5,  "target_user": self._target_multi,  "ticket_text": random.choice(multi_texts),  "correct_action": "escalate",  "correct_dept": "security"},
             {"difficulty": "breach",    "required_steps": 6,  "target_user": self._target_breach, "ticket_text": random.choice(breach_texts), "correct_action": "escalate",  "correct_dept": "engineering"},
+            {"difficulty": "privacy",   "required_steps": 7,  "target_user": self._target_privacy, "ticket_text": f"Urgent: I demand immediate deletion of my data under GDPR ({self._target_privacy}).", "correct_action": "escalate",  "correct_dept": "security"},
+            {"difficulty": "ultra",     "required_steps": 8,  "target_user": self._target_ultra,  "ticket_text": random.choice(ultra_texts),  "correct_action": "escalate",  "correct_dept": "security"},
             {"difficulty": "mega",      "required_steps": 10, "target_user": self._target_mega,   "ticket_text": random.choice(mega_texts),   "correct_action": "escalate",  "correct_dept": "engineering"},
         ]
 
@@ -711,6 +795,7 @@ class SupportEnvironment(MCPEnvironment):
             "read": False, "searched_kb": False, "checked_db": False,
             "distracted": False, "pinged_manager": False, "out_of_order": False,
             "god_query": False, "teleported": False, "lazy_resolution": False,
+            "sla_breached": False,
             "sop_violations": 0,
             "milestones": set(), "queried_users": set(),
             # Tracking Instruction Following
@@ -721,6 +806,7 @@ class SupportEnvironment(MCPEnvironment):
         
         self._state = State(episode_id=episode_id or str(uuid4()), step_count=0)
         self.__class__._latest_instance = self
+        self.__class__._instances[self._state.episode_id] = self
         return Observation(done=False, reward=0.0, metadata={"difficulty": self._current_task["difficulty"]})
 
     def _step_impl(self, action: Action, **kwargs) -> Observation: 
@@ -728,8 +814,12 @@ class SupportEnvironment(MCPEnvironment):
 
     def step(self, action: Action, **kwargs) -> Observation:
         active_instance = self
+        
+        req_episode_id = kwargs.get("episode_id") or _current_episode_id.get()
+        if req_episode_id and req_episode_id in self.__class__._instances:
+            active_instance = self.__class__._instances[req_episode_id]
         # Safely check if self has an empty task (FastAPI dummy instance check)
-        if not getattr(self, "_current_task", None) and getattr(self.__class__, "_latest_instance", None):
+        elif not getattr(active_instance, "_current_task", None) and getattr(self.__class__, "_latest_instance", None):
             active_instance = self.__class__._latest_instance
             
         token = _active_env.set(active_instance)
@@ -739,6 +829,7 @@ class SupportEnvironment(MCPEnvironment):
                 
             if isinstance(action, CallToolAction):
                 active_instance._state.step_count += 1
+                active_instance._tools_used.append(action.tool_name)
                 
             # Execute on the CURRENT thread's instance so FastMCP doesn't silently fail cross-thread!
             obs = super().step(action, **kwargs)

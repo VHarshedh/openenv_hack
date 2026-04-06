@@ -32,7 +32,7 @@ LOCAL_IMAGE_NAME = _strip(os.getenv("LOCAL_IMAGE_NAME", "support_env_image"))
 # Optional wall-clock budget for the whole run
 INFERENCE_MAX_SECONDS = int(os.getenv("INFERENCE_MAX_SECONDS", "1200"))
 
-NUM_TASKS = 9
+NUM_TASKS = 10
 MAX_STEPS_PER_TASK = 15
 
 MAX_CONSECUTIVE_FAILS = 2  # lock gate after this many fails in a row
@@ -108,7 +108,14 @@ async def main():
         )
 
         # Use standard OpenAI client as requested by hackathon
-        client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+        client = OpenAI(
+            base_url=API_BASE_URL, 
+            api_key=HF_TOKEN,
+            default_headers={
+                "HTTP-Referer": "https://openenv.org", # OpenRouter requires this
+                "X-Title": "OpenEnv Hackathon"      # OpenRouter requires this
+            }
+        )
 
         openai_tools = [
             {"type": "function", "function": {"name": "read_ticket", "description": "Read ticket.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}}, "required": ["thought"]}}},
@@ -337,6 +344,7 @@ async def main():
                     log_info(f"\n🔒 Difficulty gate locked after {MAX_CONSECUTIVE_FAILS} consecutive fails (at task {task_idx + 1}).")
             else:
                 consecutive_fails = 0  # reset streak on any pass
+                locked_at = None
 
         if not total_rewards:
             log_info("\n❌ No tasks completed.")
