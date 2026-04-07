@@ -218,9 +218,7 @@ class SupportEnvironment(MCPEnvironment):
         def read_ticket(thought: str) -> str:
             """Read the ticket."""
             env = _active_env.get() or SupportEnvironment._latest_instance
-            env._state.step_count += 1
             env._validate_thought(thought, "read_ticket")
-            env._record_tool_use("read_ticket")
             env._progress["read"] = True
             
             ticket_text = env._current_task.get("ticket_text", "Error: Ticket missing.")
@@ -233,9 +231,7 @@ class SupportEnvironment(MCPEnvironment):
         def search_knowledge_base(thought: str, query: str) -> str:
             """Search the standard operating procedure knowledge base."""
             env = _active_env.get() or SupportEnvironment._latest_instance
-            env._state.step_count += 1
             env._validate_thought(thought, "search_knowledge_base")
-            env._record_tool_use("search_knowledge_base")
             if not env._progress["read"]: env._progress["out_of_order"] = True
 
             tokens = _tokenize(query)
@@ -283,9 +279,7 @@ class SupportEnvironment(MCPEnvironment):
         def check_billing(thought: str, user_id: str) -> str:
             """Check account status."""
             env = _active_env.get() or SupportEnvironment._latest_instance
-            env._state.step_count += 1
             env._validate_thought(thought, "check_billing")
-            env._record_tool_use("check_billing")
             if not env._progress["read"]: env._progress["out_of_order"] = True
 
             # Anti-Cheat: Teleportation — Tasks 1-6
@@ -347,9 +341,7 @@ class SupportEnvironment(MCPEnvironment):
         def ping_human_manager(thought: str, reason: str) -> str:
             """Ask a manager for help."""
             env = _active_env.get() or SupportEnvironment._latest_instance
-            env._state.step_count += 1
             env._validate_thought(thought, "ping_human_manager")
-            env._record_tool_use("ping_human_manager")
             env._progress["pinged_manager"] = True
             return "SYSTEM AUTO-REPLY: All managers are currently offline. Please follow standard SOP."
 
@@ -357,7 +349,6 @@ class SupportEnvironment(MCPEnvironment):
         def escalate_ticket(thought: str, department: str) -> str:
             """Escalate to another department (billing, security, engineering)."""
             env = _active_env.get() or SupportEnvironment._latest_instance
-            env._state.step_count += 1
             env._validate_thought(thought, "escalate_ticket")
             # Process Supervision: SOP soft-block (easy tasks exempt — no DB check required)
             diff = env._current_task.get("difficulty", "")
@@ -378,7 +369,6 @@ class SupportEnvironment(MCPEnvironment):
         def resolve_ticket(thought: str, message: str) -> str:
             """Resolve the issue and message the user."""
             env = _active_env.get() or SupportEnvironment._latest_instance
-            env._state.step_count += 1
             env._validate_thought(thought, "resolve_ticket")
 
             # Process Supervision: must read ticket first
@@ -443,7 +433,7 @@ class SupportEnvironment(MCPEnvironment):
             self._progress["thought_identified_request"] = True
             
         # Step 2: Note specific states (Context-Aware: Only valid if they have actually queried the DB OR are querying now)
-        if self._progress.get("checked_db", False) or tool_name == "check_billing":
+        if self._progress.get("checked_db", False) or tool_name == "check_billing" or self._current_task.get("difficulty") == "easy":
             if any(w in thought_lower for w in [
                 "status", "active", "suspended", "state", "red-flag",
                 "banned", "disabled", "status is", "found in db"
