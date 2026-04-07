@@ -9,34 +9,50 @@ from pathlib import Path
 from datetime import datetime
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import AsyncOpenAI
 
-# Global environment loading (soft-load for submission)
+# Only the real `.env` next to this file (not cwd, not `.env.example`).
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
-load_dotenv(_ENV_PATH if _ENV_PATH.is_file() else None, override=True)
+if not _ENV_PATH.is_file():
+    print(f"❌ ERROR: Missing {_ENV_PATH}", file=sys.stderr)
+    print("   Create that file and set ENV_URL, API_BASE_URL, MODEL_NAME, HF_TOKEN.", file=sys.stderr)
+    sys.exit(1)
+load_dotenv(_ENV_PATH, override=True)
+
 
 def log_info(msg: str):
     """Utility to print non-essential logs to stderr so stdout remains pure for the grader."""
     print(msg, file=sys.stderr)
 
+
 def _strip(s: str | None) -> str:
     return (s or "").strip()
 
-# Resilient environment variable loading
-HF_TOKEN = _strip(os.getenv("HF_TOKEN") or os.getenv("API_KEY"))
-API_BASE_URL = _strip(os.getenv("API_BASE_URL", "https://api.openai.com/v1"))
-MODEL_NAME = _strip(os.getenv("MODEL_NAME", "gpt-4o"))
-ENV_URL = _strip(os.getenv("ENV_URL", "http://localhost:8000")).rstrip("/")
-LOCAL_IMAGE_NAME = _strip(os.getenv("LOCAL_IMAGE_NAME", "support_env_image"))
 
-# Optional wall-clock budget for the whole run
-INFERENCE_MAX_SECONDS = int(os.getenv("INFERENCE_MAX_SECONDS", "1200"))
+_REQUIRED = ("HF_TOKEN", "ENV_URL", "API_BASE_URL", "MODEL_NAME")
+_missing = [k for k in _REQUIRED if not _strip(os.getenv(k))]
+if _missing:
+    log_info(f"❌ ERROR: {_ENV_PATH} is missing keys: {', '.join(_missing)}")
+    sys.exit(1)
+
+HF_TOKEN = _strip(os.getenv("HF_TOKEN"))
+if "PASTE" in HF_TOKEN:
+    log_info("❌ ERROR: Replace placeholder HF_TOKEN in .env.")
+    sys.exit(1)
+
+ENV_URL = _strip(os.getenv("ENV_URL")).rstrip("/")
+API_BASE_URL = _strip(os.getenv("API_BASE_URL"))
+MODEL_NAME = _strip(os.getenv("MODEL_NAME"))
+
+# ---------------------------------------------------------------------------
+# Configuration (defaults below are optional tuning only)
+# ---------------------------------------------------------------------------
 
 NUM_TASKS = 10
 MAX_STEPS_PER_TASK = 15
 
-MAX_CONSECUTIVE_FAILS = 2  # lock gate after this many fails in a row
-MAX_SKIP_AFTER_LOCK   = 2  # when locked, agent can still attempt next N tasks
+# Wall-clock budget for the whole run (default 20 minutes for hackathon validators)
+INFERENCE_MAX_SECONDS = int(os.getenv("INFERENCE_MAX_SECONDS", "1200"))
 
 
 def _step_delay_seconds() -> int:
@@ -107,15 +123,8 @@ async def main():
             f"Wall budget: {INFERENCE_MAX_SECONDS}s (INFERENCE_MAX_SECONDS).\n"
         )
 
-        # Use standard OpenAI client as requested by hackathon
-        client = OpenAI(
-            base_url=API_BASE_URL, 
-            api_key=HF_TOKEN,
-            default_headers={
-                "HTTP-Referer": "https://openenv.org", # OpenRouter requires this
-                "X-Title": "OpenEnv Hackathon"      # OpenRouter requires this
-            }
-        )
+        # Use AsyncOpenAI instead of OpenAI
+        client = AsyncOpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
         openai_tools = [
             {"type": "function", "function": {"name": "read_ticket", "description": "Read ticket.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}}, "required": ["thought"]}}},
@@ -133,23 +142,9 @@ async def main():
             "tasks": []
         }
 
-        # Dynamic difficulty gating — 2-consecutive-fail streak system
-        consecutive_fails = 0
-        locked_at: int | None = None
-
         for task_idx in range(NUM_TASKS):
             if time_budget_exceeded():
                 break
-
-            # Difficulty gate: skip tasks beyond locked window
-            if locked_at is not None and task_idx > locked_at + MAX_SKIP_AFTER_LOCK:
-                task_name = f"task_{task_idx + 1}"
-                log_info(f"\n⏭ Skipping task {task_idx + 1} — difficulty gate active (locked after task {locked_at + 1}).")
-                print(f"[START] task={task_name} env=support_env model={MODEL_NAME}", flush=True)
-                print(f"[END] success=false steps=0 score=0.00 rewards=0.00", flush=True)
-                total_rewards.append(0.0)
-                run_logs["tasks"].append({"task_idx": task_idx, "difficulty": "skipped", "steps": [], "final_reward": 0.0})
-                continue
 
             log_info(f"\n{'='*60}\n   TASK {task_idx + 1}\n{'='*60}")
 
@@ -161,12 +156,14 @@ async def main():
             response = await http_client.post(f"{ENV_URL}/reset", json={"task_idx": task_idx}, timeout=10.0)
             response.raise_for_status()
             
-            reset_data = response.json()
-            episode_id = reset_data.get("state", {}).get("episode_id") or reset_data.get("episode_id")
+            # FIX: Explicitly fetch the state to get the episode_id required for Phase 1 Concurrency
+            state_resp = await http_client.get(f"{ENV_URL}/state", timeout=10.0)
+            state_resp.raise_for_status()
+            episode_id = state_resp.json().get("episode_id")
 
             task_log = {
                 "task_idx": task_idx,
-                "difficulty": reset_data.get("observation", {}).get("metadata", {}).get("difficulty"),
+                "difficulty": response.json().get("observation", {}).get("metadata", {}).get("difficulty"),
                 "steps": [],
                 "final_reward": 0.0
             }
@@ -197,7 +194,7 @@ async def main():
                     api_success = False
                     for attempt in range(3):
                         try:
-                            response = client.chat.completions.create(
+                            response = await client.chat.completions.create(
                                 model=MODEL_NAME,
                                 messages=messages,
                                 tools=openai_tools,
@@ -330,21 +327,11 @@ async def main():
                     rewards_str = "0.00"
                 else:
                     rewards_str = ",".join([f"{r:.2f}" for r in rewards_history])
-                print(f"[END] success={success_str} steps={step_count} score={final_reward:.2f} rewards={rewards_str}", flush=True)
+                print(f"[END] success={success_str} steps={step_count} rewards={rewards_str}", flush=True)
 
             task_log["final_reward"] = final_reward
             run_logs["tasks"].append(task_log)
             total_rewards.append(final_reward)
-
-            # Update consecutive-fail streak gate
-            if final_reward < 0.3:
-                consecutive_fails += 1
-                if consecutive_fails >= MAX_CONSECUTIVE_FAILS and locked_at is None:
-                    locked_at = task_idx
-                    log_info(f"\n🔒 Difficulty gate locked after {MAX_CONSECUTIVE_FAILS} consecutive fails (at task {task_idx + 1}).")
-            else:
-                consecutive_fails = 0  # reset streak on any pass
-                locked_at = None
 
         if not total_rewards:
             log_info("\n❌ No tasks completed.")
