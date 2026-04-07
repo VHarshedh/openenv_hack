@@ -50,6 +50,21 @@ KNOWLEDGE_BASE = {
 def _tokenize(text: str) -> set:
     return set(re.findall(r'\b[a-z0-9]+\b', text.lower()))
 
+
+# Phase 2 evaluators require every task score to satisfy 0 < score < 1 (exclude 0.0 and 1.0).
+_SCORE_MIN = 0.01
+_SCORE_MAX = 0.99
+
+
+def _clamp_task_score(value: Any) -> float:
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return _SCORE_MIN
+    if x != x:  # NaN
+        return _SCORE_MIN
+    return max(_SCORE_MIN, min(_SCORE_MAX, x))
+
 _CANONICAL_TRIGGERS: frozenset = frozenset({
     "password", "refund", "delete", "account", "500",
     "suspended", "x77", "email", "aegis", "audit", "shadow",
@@ -516,7 +531,7 @@ class SupportEnvironment(MCPEnvironment):
             if self._tools_used.count(tool) > allowed_repeats: 
                 r -= (self._tools_used.count(tool) - allowed_repeats) * 0.05
 
-        return max(0.01, min(0.99, r))
+        return _clamp_task_score(r)
 
     def _finalize_episode(self, action_type: str, department: str | None = None) -> None:
         if self._episode_done: return
@@ -564,7 +579,7 @@ class SupportEnvironment(MCPEnvironment):
             if (has_ref != has_acc) and (has_ref or has_acc):
                 r -= 0.2
 
-        self._trajectory_reward = max(0.01, min(0.99, r))
+        self._trajectory_reward = _clamp_task_score(r)
 
     def reset(self, seed: Optional[int] = None, episode_id: Optional[str] = None, **kwargs: Any) -> Observation:
         self._db = self._generate_dynamic_database()
@@ -646,7 +661,9 @@ class SupportEnvironment(MCPEnvironment):
             
             if isinstance(action, CallToolAction) and isinstance(obs, CallToolObservation):
                 if not active_instance._episode_done: 
-                    active_instance._trajectory_reward = max(0.01, min(0.99, active_instance._get_partial_reward()))
+                    active_instance._trajectory_reward = _clamp_task_score(
+                        active_instance._get_partial_reward()
+                    )
                 obs.done = active_instance._episode_done
                 obs.reward = active_instance._trajectory_reward
                 

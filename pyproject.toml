@@ -18,6 +18,7 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "openenv",
+    "openenv-core[core]>=0.2.1",
     "fastmcp",
     "pydantic",
     "openai",

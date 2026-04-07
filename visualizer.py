@@ -22,17 +22,24 @@ uploaded_file = st.file_uploader("Upload results.json", type=["json"])
 if uploaded_file is not None:
     try:
         data = json.load(uploaded_file)
-        
-        # Safely extract tasks based on the inference.py schema
-        runs = data.get("tasks", [])
-        if not runs and isinstance(data, dict) and "runs" in data:
-             runs = data["runs"]
-        elif not runs and isinstance(data, list):
-             runs = data
+
+        # inference.py writes: { "tasks": [ { "steps": [...], "final_reward", ... }, ... ] }
+        # Legacy / alt layouts: top-level "runs", or raw list, or nested under "results".
+        runs: list = []
+        if isinstance(data, dict):
+            runs = data.get("tasks") or data.get("runs") or []
+            if not runs and isinstance(data.get("results"), dict):
+                inner = data["results"]
+                runs = inner.get("tasks") or inner.get("runs") or []
+        elif isinstance(data, list):
+            runs = data
 
         if not runs:
-             st.error("Could not find valid task data in this JSON file.")
-             st.stop()
+            st.error(
+                "Could not find task trajectories. Expected a JSON object with a **tasks** array "
+                "(as produced by inference.py), or legacy **runs**."
+            )
+            st.stop()
             
         st.sidebar.header("Select Task")
         
@@ -47,9 +54,13 @@ if uploaded_file is not None:
         selected_idx = task_options.index(selected_task_str)
         
         selected_run = runs[selected_idx]
-        
-        # Extract steps based on new schema
-        history = selected_run.get("steps", selected_run.get("history", []))
+
+        # Step timeline: inference.py uses "steps"; older files used "history".
+        history = (
+            selected_run.get("steps")
+            or selected_run.get("history")
+            or []
+        )
         score = selected_run.get("final_reward", selected_run.get("reward", 0.0))
         
         # Determine status
@@ -64,9 +75,13 @@ if uploaded_file is not None:
         st.subheader("Agent Timeline")
         
         for step_idx, step in enumerate(history):
-            # Handle new flat schema from inference.py
-            tool_name = step.get("tool_name", "unknown")
-            args = step.get("arguments", {})
+            # inference.py: tool_name + arguments; chat fallbacks use "action" / "content"
+            tool_name = step.get("tool_name") or step.get("action") or "unknown"
+            raw_args = step.get("arguments")
+            if isinstance(raw_args, dict):
+                args = dict(raw_args)
+            else:
+                args = {}
             thought = args.pop("thought", "No thought provided.")
             
             # Extract raw result text

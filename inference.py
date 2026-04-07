@@ -17,7 +17,7 @@ _ENV_PATH = Path(__file__).resolve().parent / ".env"
 if _ENV_PATH.is_file():
     load_dotenv(_ENV_PATH, override=True)
 
-# Now standard os.getenv() will fetch the evaluator's injected variables!
+# os.getenv() picks up evaluator-injected env vars; optional `.env` only augments local dev.
 def log_info(msg: str):
     """Utility to print non-essential logs to stderr so stdout remains pure for the grader."""
     print(msg, file=sys.stderr)
@@ -27,38 +27,96 @@ def _strip(s: str | None) -> str:
     return (s or "").strip()
 
 
-_REQUIRED = ("HF_TOKEN", "ENV_URL", "API_BASE_URL", "MODEL_NAME")
-_missing = [k for k in _REQUIRED if not _strip(os.getenv(k))]
-if _missing:
-    log_info(f"❌ ERROR: {_ENV_PATH} is missing keys: {', '.join(_missing)}")
+def _first_nonempty_env(*names: str) -> str:
+    for name in names:
+        v = _strip(os.getenv(name))
+        if v:
+            return v
+    return ""
+
+
+# Rubric / sample script: HF_TOKEN or OPENAI_API_KEY (or API_KEY). No `.env` required in containers.
+API_KEY = _first_nonempty_env("HF_TOKEN", "OPENAI_API_KEY", "API_KEY")
+if not API_KEY:
+    log_info(
+        "❌ ERROR: Set one of HF_TOKEN, OPENAI_API_KEY, or API_KEY in the environment "
+        "(evaluators may inject only OPENAI_API_KEY)."
+    )
+    sys.exit(1)
+if "PASTE" in API_KEY:
+    log_info("❌ ERROR: Replace placeholder API key in the environment.")
     sys.exit(1)
 
-HF_TOKEN = _strip(os.getenv("HF_TOKEN"))
-if "PASTE" in HF_TOKEN:
-    log_info("❌ ERROR: Replace placeholder HF_TOKEN in .env.")
-    sys.exit(1)
+# HF Inference API router default matches hackathon sample; override with API_BASE_URL or OPENAI_BASE_URL.
+_DEFAULT_LLM_BASE = "https://router.huggingface.co/v1"
+API_BASE_URL = _first_nonempty_env("API_BASE_URL", "OPENAI_BASE_URL") or _DEFAULT_LLM_BASE
 
-ENV_URL = _strip(os.getenv("ENV_URL")).rstrip("/")
-API_BASE_URL = _strip(os.getenv("API_BASE_URL"))
-MODEL_NAME = _strip(os.getenv("MODEL_NAME"))
+# Environment server (OpenEnv HTTP) — sidecar on Spaces is usually localhost:8000.
+ENV_URL = _strip(os.getenv("ENV_URL", "http://127.0.0.1:8000")).rstrip("/")
+MODEL_NAME = _strip(os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct"))
 
 # ---------------------------------------------------------------------------
 # Configuration (defaults below are optional tuning only)
 # ---------------------------------------------------------------------------
 
-NUM_TASKS = 10
-MAX_STEPS_PER_TASK = 15
+NUM_TASKS = int(os.getenv("NUM_TASKS", "10"))
+MAX_STEPS_PER_TASK = int(os.getenv("MAX_STEPS_PER_TASK", "15"))
 
-# Wall-clock budget for the whole run (default 20 minutes for hackathon validators)
+# Wall-clock budget (default 20 min). Raise only if evaluators allow (e.g. INFERENCE_MAX_SECONDS=1800).
 INFERENCE_MAX_SECONDS = int(os.getenv("INFERENCE_MAX_SECONDS", "1200"))
 
+# Phase 2: task scores must satisfy 0 < score < 1 (not 0.0, not 1.0). Also avoid printing
+# "1.00" / "0.00" from rounding (e.g. 0.997 → 1.00 breaks strict parsers).
+_PHASE2_MIN = 0.01
+_PHASE2_MAX = 0.99
 
-def _step_delay_seconds() -> int:
-    """Delay between steps (after step 1). Override with STEP_DELAY_SECONDS; else model-based default."""
+
+def _clamp_phase2_score(raw) -> float:
+    try:
+        if raw is None:
+            x = _PHASE2_MIN
+        else:
+            x = float(raw)
+    except (TypeError, ValueError):
+        x = _PHASE2_MIN
+    if x != x:  # NaN
+        x = _PHASE2_MIN
+    return max(_PHASE2_MIN, min(_PHASE2_MAX, x))
+
+
+def _fmt_phase2_reward(x: float) -> str:
+    return f"{_clamp_phase2_score(x):.2f}"
+
+
+def _configured_step_delay_seconds() -> int:
+    """Artificial pause between steps (after step 1). Default 0 so baseline finishes within 20 min.
+
+    Set STEP_DELAY_SECONDS>0 locally if your provider rate-limits aggressive calls.
+    """
     override = os.getenv("STEP_DELAY_SECONDS")
     if override is not None and override.strip() != "":
         return max(0, int(override))
-    return 30 if "pro" in MODEL_NAME.lower() else 7
+    # Evaluators typically do not set this — avoid multi-minute runs from 7s/30s sleeps.
+    return 0
+
+
+def _effective_step_delay(
+    base_delay: int,
+    *,
+    run_start: float,
+    task_idx: int,
+) -> int:
+    """Drop artificial delay when wall-clock budget is tight so all tasks can finish."""
+    if base_delay <= 0:
+        return 0
+    elapsed = time.time() - run_start
+    remaining = INFERENCE_MAX_SECONDS - elapsed
+    tasks_left = max(1, NUM_TASKS - task_idx)
+    # Reserve time for ~25s LLM+env per potential step (conservative); skip sleep if under water.
+    reserve = tasks_left * MAX_STEPS_PER_TASK * 25 + 90
+    if remaining < reserve:
+        return 0
+    return base_delay
 
 
 SYSTEM_PROMPT = """You are an expert customer support triage agent.
@@ -83,7 +141,7 @@ Every tool requires a `thought` parameter. You MUST use this parameter to think 
 
 async def main():
     run_start = time.time()
-    step_delay = _step_delay_seconds()
+    step_delay = _configured_step_delay_seconds()
 
     def time_elapsed() -> float:
         return time.time() - run_start
@@ -92,37 +150,41 @@ async def main():
         if time_elapsed() >= INFERENCE_MAX_SECONDS:
             log_info(
                 f"❌ Stopping: INFERENCE_MAX_SECONDS ({INFERENCE_MAX_SECONDS}s) exceeded. "
-                "Set STEP_DELAY_SECONDS=0 or raise INFERENCE_MAX_SECONDS if needed."
+                "Increase INFERENCE_MAX_SECONDS if your platform allows, or reduce NUM_TASKS / MAX_STEPS_PER_TASK."
             )
             return True
         return False
 
     log_info("⏳ Waiting for environment server to start...")
     _server_ok = False
-    
+
     # Use httpx.AsyncClient for non-blocking HTTP requests
     async with httpx.AsyncClient(timeout=30.0) as http_client:
-        for _ in range(10):
+        for attempt in range(20):
             try:
-                await http_client.get(f"{ENV_URL}/docs", timeout=2.0)
-                _server_ok = True
-                break
+                for path in ("/health", "/docs"):
+                    r = await http_client.get(f"{ENV_URL}{path}", timeout=2.0)
+                    if r.status_code == 200:
+                        _server_ok = True
+                        break
+                if _server_ok:
+                    break
             except httpx.RequestError:
-                await asyncio.sleep(2)
-                
+                pass
+            await asyncio.sleep(1)
+
         if not _server_ok:
-            log_info("❌ ERROR: Environment server is not reachable after 10 retries!")
+            log_info("❌ ERROR: Environment server is not reachable after 20 retries (~20s).")
             sys.exit(1)
-            
+
         log_info("✅ Environment server is reachable!")
         log_info(f"🚀 Starting inference with {MODEL_NAME}...")
         log_info(
-            f"⏳ Step delay: {step_delay}s between steps (set STEP_DELAY_SECONDS to override). "
-            f"Wall budget: {INFERENCE_MAX_SECONDS}s (INFERENCE_MAX_SECONDS).\n"
+            f"⏳ Artificial step delay: {step_delay}s (STEP_DELAY_SECONDS; default 0 for eval). "
+            f"Wall budget: {INFERENCE_MAX_SECONDS}s. LLM: {API_BASE_URL}\n"
         )
 
-        # Use AsyncOpenAI instead of OpenAI
-        client = AsyncOpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+        client = AsyncOpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
         openai_tools = [
             {"type": "function", "function": {"name": "read_ticket", "description": "Read ticket.", "parameters": {"type": "object", "properties": {"thought": {"type": "string"}}, "required": ["thought"]}}},
@@ -184,8 +246,12 @@ async def main():
                     step_count += 1
 
                     if step_count > 1:
-                        log_info(f"   ⏳ Waiting {step_delay}s before next step...")
-                        await asyncio.sleep(step_delay)
+                        delay = _effective_step_delay(
+                            step_delay, run_start=run_start, task_idx=task_idx
+                        )
+                        if delay > 0:
+                            log_info(f"   ⏳ Waiting {delay}s before next step...")
+                            await asyncio.sleep(delay)
 
                     log_info(f"   --- Step {step_count} ---")
 
@@ -204,8 +270,10 @@ async def main():
                         except Exception as e:
                             log_info(f"   ⚠ API error on attempt {attempt + 1}: {e}")
                             if "429" in str(e) or "quota" in str(e).lower() or "503" in str(e):
-                                log_info("   🚨 Rate limit/Server busy. Cooling down for 30s...")
-                                await asyncio.sleep(30)
+                                cool = int(os.getenv("RATE_LIMIT_SLEEP_SECONDS", "20"))
+                                cool = max(5, min(60, cool))
+                                log_info(f"   🚨 Rate limit/Server busy. Cooling down for {cool}s...")
+                                await asyncio.sleep(cool)
                             else:
                                 break
 
@@ -280,8 +348,8 @@ async def main():
                                 tool_out = str(result_obj)
 
                         done = res.get("done", False)
-                        reward = res.get("reward", 0.0)
-                        
+                        reward = _clamp_phase2_score(res.get("reward"))
+
                         log_info(f"   📋 Result: {tool_out[:100]}...")
                         log_info(f"   💰 Reward: {round(reward, 2)}")
 
@@ -301,7 +369,10 @@ async def main():
                         action_str = action_str.replace('\n', ' ').replace('\r', '')
                         done_str = "true" if done else "false"
                         rewards_history.append(reward)
-                        print(f"[STEP] step={step_count} action={action_str} reward={reward:.2f} done={done_str} error=null", flush=True)
+                        print(
+                            f"[STEP] step={step_count} action={action_str} reward={_fmt_phase2_reward(reward)} done={done_str} error=null",
+                            flush=True,
+                        )
 
                         if done:
                             final_reward = reward
@@ -320,12 +391,17 @@ async def main():
             finally:
                 # >>> STDOUT MANDATORY REQUIREMENT: [END] <<<
                 # (Executes even if exception occurs to ensure compliance)
+                final_reward = _clamp_phase2_score(final_reward)
                 success_str = "true" if done and final_reward > 0.1 else "false"
                 if not rewards_history:
-                    rewards_str = "0.01"
+                    rewards_str = _fmt_phase2_reward(_PHASE2_MIN)
                 else:
-                    rewards_str = ",".join([f"{r:.2f}" for r in rewards_history])
-                print(f"[END] success={success_str} steps={step_count} rewards={rewards_str}", flush=True)
+                    rewards_str = ",".join(_fmt_phase2_reward(r) for r in rewards_history)
+                # Grader regex requires score=<float> on the same line as [END].
+                print(
+                    f"[END] success={success_str} steps={step_count} score={_fmt_phase2_reward(final_reward)} rewards={rewards_str}",
+                    flush=True,
+                )
 
             task_log["final_reward"] = final_reward
             run_logs["tasks"].append(task_log)
