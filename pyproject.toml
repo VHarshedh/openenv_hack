@@ -24,14 +24,17 @@ dependencies = [
     "openai",
     "httpx",
     "python-dotenv",
-    "streamlit",
-    "pandas"
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.0.0",
+]
+# Dashboard only — not installed in Docker/HF Space (keeps image small, faster unpack on Windows).
+viz = [
+    "streamlit",
+    "pandas",
 ]
 
 [project.scripts]

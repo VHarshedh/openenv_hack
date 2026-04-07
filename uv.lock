@@ -2829,11 +2829,8 @@ dependencies = [
     { name = "openai" },
     { name = "openenv" },
     { name = "openenv-core", extra = ["core"] },
-    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "pandas", version = "3.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pydantic" },
     { name = "python-dotenv" },
-    { name = "streamlit" },
     { name = "uvicorn" },
 ]
 
@@ -2841,6 +2838,11 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
+]
+viz = [
+    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "pandas", version = "3.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "streamlit" },
 ]
 
 [package.metadata]
@@ -2851,15 +2853,15 @@ requires-dist = [
     { name = "openai" },
     { name = "openenv" },
     { name = "openenv-core", extras = ["core"], specifier = ">=0.2.1" },
-    { name = "pandas" },
+    { name = "pandas", marker = "extra == 'viz'" },
     { name = "pydantic" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "python-dotenv" },
-    { name = "streamlit" },
+    { name = "streamlit", marker = "extra == 'viz'" },
     { name = "uvicorn" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "viz"]
 
 [[package]]
 name = "tenacity"

@@ -1,9 +1,4 @@
-.venv
-.git
 .gitignore
-.env
-__pycache__/
-*.pyc
 *.pyo
 *.pyd
 *.pyw
@@ -14,3 +9,20 @@ __pycache__/
 *.txt
 *.log
 
+.venv
+.env
+__pycache__
+*.pyc
+results/
+.git
+
+# Not required for the API server (smaller build context)
+test_*.py
+*_test_server.py
+visualizer.py
+export_dpo.py
+validate-submission.sh
+sample_trajectory.json
+dpo_dataset.jsonl
+_http_test_server.py
+.hfignore

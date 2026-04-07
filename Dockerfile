@@ -57,6 +57,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # The second `uv sync` installs the project into `.venv` (including console scripts).
 # Do not use `.venv/bin/pip`: uv's default venv often has no pip executable.
 
+# Drop bytecode caches to shrink layers (faster docker export/unpack, esp. Docker Desktop on Windows).
+RUN /app/env/.venv/bin/python -c "\
+import pathlib, shutil; \
+root = pathlib.Path('/app/env/.venv'); \
+[p.unlink(missing_ok=True) for p in root.rglob('*.py[co]')]; \
+[shutil.rmtree(p) for p in root.rglob('__pycache__') if p.is_dir()] \
+"
+
 # Final runtime stage
 FROM ${BASE_IMAGE}
 
