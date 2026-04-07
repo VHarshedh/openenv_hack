@@ -10,7 +10,7 @@ tags:
   - agents
 ---
 
-# Customer Support Triage Agent (OpenEnv)
+# 🛡️ ComplianceGuard: Support Triage Environment
 
 A highly robust, anti-cheat simulated OpenEnv environment designed to test and train Large Language Models on complex, multi-step customer support triage tasks.
 
@@ -118,3 +118,34 @@ export HF_TOKEN="your_token_here"
 # Run the evaluation
 python inference.py > output.log
 ```
+
+### 3. Visualizing Results (Streamlit Dashboard)
+
+Terminal logs can be difficult to parse. We provide a Streamlit dashboard to visually replay agent trajectories, displaying step-by-step Chain-of-Thought, tool arguments, and highlighted `SYSTEM_REJECT` process supervision blocks.
+
+```bash
+pip install streamlit pandas
+streamlit run visualizer.py
+```
+
+Simply upload any `.json` file from the `results/` directory into the UI. If inference.py hasn't been run yet, you can use the sample_trajectory.json in the root directory for the visualization.
+
+### 4. The Data Engine (Exporting DPO)
+
+ComplianceGuard is designed to double as a training data generator.
+
+*   **`export_dpo.py`**: Parses evaluation logs and converts them into a Hugging Face Direct Preference Optimization (DPO) dataset. Trajectories scoring >= 0.8 are labeled as **Chosen**, while those hitting a `SYSTEM_REJECT` are labeled as **Rejected**.
+*   **`dpo_dataset.jsonl`**: The exported output file, ready for fine-tuning Llama 4 or Qwen models for enterprise safety.
+
+```bash
+python export_dpo.py --log_dir ./results
+```
+
+## 🧪 Project Structure & Test Suite
+
+To ensure mathematical precision and strict API compliance, the repository includes a comprehensive test suite:
+
+*   **`test_ws.py`**: The Gold-Standard Integration Test. Bypasses LLM latency to execute the hard-coded perfect trajectory, proving the environment is solvable and mathematically achieves a perfect 0.99 across all 10 tasks.
+*   **`test_api.py`**: Validates the OpenEnv / FastMCP OpenAI client proxy integration.
+*   **`test_local_env.py`**: Tests core environment logic locally without FastAPI/HTTP overhead.
+*   **`test_http_reset.py`**: Validates the Phase 1 Strict Concurrency architecture, ensuring `/reset` and `/state` properly track and isolate `episode_id` lifecycles.

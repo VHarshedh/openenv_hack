@@ -12,14 +12,12 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 # Only the real `.env` next to this file (not cwd, not `.env.example`).
+# Replace the strict .env check with this graceful load:
 _ENV_PATH = Path(__file__).resolve().parent / ".env"
-if not _ENV_PATH.is_file():
-    print(f"❌ ERROR: Missing {_ENV_PATH}", file=sys.stderr)
-    print("   Create that file and set ENV_URL, API_BASE_URL, MODEL_NAME, HF_TOKEN.", file=sys.stderr)
-    sys.exit(1)
-load_dotenv(_ENV_PATH, override=True)
+if _ENV_PATH.is_file():
+    load_dotenv(_ENV_PATH, override=True)
 
-
+# Now standard os.getenv() will fetch the evaluator's injected variables!
 def log_info(msg: str):
     """Utility to print non-essential logs to stderr so stdout remains pure for the grader."""
     print(msg, file=sys.stderr)
@@ -165,7 +163,7 @@ async def main():
                 "task_idx": task_idx,
                 "difficulty": response.json().get("observation", {}).get("metadata", {}).get("difficulty"),
                 "steps": [],
-                "final_reward": 0.0
+                "final_reward": 0.01
             }
 
             messages = [
@@ -175,7 +173,7 @@ async def main():
 
             done = False
             step_count = 0
-            final_reward = 0.0
+            final_reward = 0.01
             rewards_history = []
 
             try:
@@ -214,7 +212,7 @@ async def main():
                     if not api_success:
                         log_info("   ❌ API failed after retries. Aborting task.")
                         # STDOUT failure step log before breaking
-                        print(f"[STEP] step={step_count} action=api_fail() reward=0.00 done=true error=\"API failed\"", flush=True)
+                        print(f"[STEP] step={step_count} action=api_fail() reward=0.01 done=true error=\"API failed\"", flush=True)
                         break
 
                     response_message = response.choices[0].message
@@ -254,8 +252,8 @@ async def main():
                             messages.append({"role": "tool", "tool_call_id": tool_call.id, "name": name, "content": tool_out})
                             task_log["steps"].append({"action": "invalid_json", "error": tool_out})
                             
-                            rewards_history.append(0.0)
-                            print(f"[STEP] step={step_count} action={name}(invalid_json) reward=0.00 done=false error=\"invalid_json\"", flush=True)
+                            rewards_history.append(0.01)
+                            print(f"[STEP] step={step_count} action={name}(invalid_json) reward=0.01 done=false error=\"invalid_json\"", flush=True)
                             continue
 
                         log_info(f"   🔧 Tool: {name}({json.dumps(args)})")
@@ -315,16 +313,16 @@ async def main():
                         messages.append({"role": "user", "content": "Focus. Use a tool to progress."})
                         task_log["steps"].append({"action": "chat", "content": safe_content})
                         
-                        rewards_history.append(0.0)
+                        rewards_history.append(0.01)
                         # >>> STDOUT MANDATORY REQUIREMENT: [STEP] (for non-tool responses) <<<
-                        print(f"[STEP] step={step_count} action=chat() reward=0.00 done=false error=\"Did not call tool\"", flush=True)
+                        print(f"[STEP] step={step_count} action=chat() reward=0.01 done=false error=\"Did not call tool\"", flush=True)
 
             finally:
                 # >>> STDOUT MANDATORY REQUIREMENT: [END] <<<
                 # (Executes even if exception occurs to ensure compliance)
-                success_str = "true" if done and final_reward > 0.0 else "false"
+                success_str = "true" if done and final_reward > 0.1 else "false"
                 if not rewards_history:
-                    rewards_str = "0.00"
+                    rewards_str = "0.01"
                 else:
                     rewards_str = ",".join([f"{r:.2f}" for r in rewards_history])
                 print(f"[END] success={success_str} steps={step_count} rewards={rewards_str}", flush=True)

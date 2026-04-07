@@ -5,7 +5,7 @@ A Streamlit dashboard to visually replay agent trajectories.
 Highlights SYSTEM_REJECT soft-blocks to showcase process supervision.
 
 Usage:
-    pip install streamlit
+    pip install streamlit pandas
     streamlit run visualizer.py
 """
 import streamlit as st
@@ -22,24 +22,35 @@ uploaded_file = st.file_uploader("Upload results.json", type=["json"])
 if uploaded_file is not None:
     try:
         data = json.load(uploaded_file)
-        runs = data.get("runs", data) if isinstance(data, dict) else data
-        if isinstance(runs, dict):
-            runs = list(runs.values())
+        
+        # Safely extract tasks based on the inference.py schema
+        runs = data.get("tasks", [])
+        if not runs and isinstance(data, dict) and "runs" in data:
+             runs = data["runs"]
+        elif not runs and isinstance(data, list):
+             runs = data
+
+        if not runs:
+             st.error("Could not find valid task data in this JSON file.")
+             st.stop()
             
         st.sidebar.header("Select Task")
         
         # Create a dropdown for tasks
         task_options = []
         for i, run in enumerate(runs):
-            score = run.get("reward", run.get("score", 0.0))
+            # Support both schema formats for final score
+            score = run.get("final_reward", run.get("reward", run.get("score", 0.0)))
             task_options.append(f"Task {i+1} (Score: {score:.2f})")
             
         selected_task_str = st.sidebar.selectbox("Choose Trajectory:", task_options)
         selected_idx = task_options.index(selected_task_str)
         
         selected_run = runs[selected_idx]
-        history = selected_run.get("history", [])
-        score = selected_run.get("reward", selected_run.get("score", 0.0))
+        
+        # Extract steps based on new schema
+        history = selected_run.get("steps", selected_run.get("history", []))
+        score = selected_run.get("final_reward", selected_run.get("reward", 0.0))
         
         # Determine status
         if score >= 0.8:
@@ -53,18 +64,13 @@ if uploaded_file is not None:
         st.subheader("Agent Timeline")
         
         for step_idx, step in enumerate(history):
-            action = step.get("action", {})
-            obs = step.get("observation", {})
-            
-            tool_name = action.get("tool_name", "unknown")
-            args = action.get("arguments", {})
+            # Handle new flat schema from inference.py
+            tool_name = step.get("tool_name", "unknown")
+            args = step.get("arguments", {})
             thought = args.pop("thought", "No thought provided.")
             
             # Extract raw result text
-            res = obs.get("result", "")
-            if isinstance(res, dict):
-                res = res.get("data", res.get("content", str(res)))
-            res_str = str(res)
+            res_str = str(step.get("result", ""))
             
             with st.expander(f"Step {step_idx + 1}: {tool_name}", expanded=True):
                 st.markdown(f"**🧠 Thought:**\n> {thought}")

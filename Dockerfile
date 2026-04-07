@@ -54,6 +54,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv sync --no-editable; \
     fi
 
+# Ensure the package itself is installed via pip to resolve any pathing/entrypoint ambiguities
+RUN .venv/bin/pip install --no-cache-dir .
+
 # Final runtime stage
 FROM ${BASE_IMAGE}
 

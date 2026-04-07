@@ -9,18 +9,22 @@ requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "openenv-support_env"
+name = "support_env"
 version = "0.1.0"
-description = "Support Env environment for OpenEnv"
+description = "ComplianceGuard Support Triage OpenEnv"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    # Core OpenEnv runtime (provides FastAPI server + HTTP client types)
-    # install from github
-    "openenv-core[core]>=0.2.1",
-    "openai>=1.0.0",
-    "httpx>=0.25.0",
-    "python-dotenv>=1.0.0",
-    "fastmcp>=0.1.0",
+    "fastapi",
+    "uvicorn",
+    "openenv",
+    "fastmcp",
+    "pydantic",
+    "openai",
+    "httpx",
+    "python-dotenv",
+    "streamlit",
+    "pandas"
 ]
 
 [project.optional-dependencies]
