@@ -106,12 +106,14 @@ docker run -p 8000:8000 support_env
 
 ### 2. Run Inference (Evaluation)
 
-We provide a baseline `inference.py` script that utilizes the OpenAI API client format to run evaluations.
+We provide a baseline `inference.py` script that utilizes the OpenAI API client format to run evaluations. This script is enterprise-grade and specifically optimized for the OpenEnv 20-minute hackathon timeout limit:
+* **Adaptive Delay Scaling:** Automatically zero-scales artificial delays if the wall-clock limit is approached, guaranteeing all 10 tasks finish.
+* **Resilient Auth:** Safely accepts `HF_TOKEN`, `OPENAI_API_KEY`, or `API_KEY` injected by evaluators.
 
 ```bash
-# Set your environment variables in a .env file
+# Set your environment variables
 export ENV_URL="http://localhost:8000"
-export API_BASE_URL="https://router.huggingface.co/v1"
+export API_BASE_URL="[https://router.huggingface.co/v1](https://router.huggingface.co/v1)"
 export MODEL_NAME="gemini-3.1-flash-lite-preview"
 export HF_TOKEN="your_token_here"
 
@@ -119,10 +121,13 @@ export HF_TOKEN="your_token_here"
 python inference.py > output.log
 ```
 
-### 3. Visualizing Results (Streamlit Dashboard)
+### 3. Visualizing Results (Run Locally)
 
 Terminal logs can be difficult to parse. We provide a Streamlit dashboard to visually replay agent trajectories, displaying step-by-step Chain-of-Thought, tool arguments, and highlighted `SYSTEM_REJECT` process supervision blocks.
 
+**⚠️ IMPORTANT: To keep the OpenEnv Docker container lightweight and lightning-fast for automated grading, the visualizer is designed to be run LOCALLY on your host machine.**
+
+Open a new terminal on your local machine and run:
 ```bash
 pip install streamlit pandas
 streamlit run visualizer.py
